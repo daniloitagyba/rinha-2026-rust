@@ -1,4 +1,4 @@
-use crate::vector::{distance_sq, neighbor_keys, QuantizedVector, BUCKET_COUNT, DIM, K};
+use crate::vector::{neighbor_keys, QuantizedVector, BUCKET_COUNT, DIM, K};
 use std::env;
 use std::fs::File;
 use std::io;
@@ -207,8 +207,11 @@ impl Index {
         top_dist: &mut [i64; K],
         top_label: &mut [u8; K],
     ) {
-        let vector = self.vector(id as usize);
-        let dist = distance_sq(query, &vector);
+        let dist = self.distance_sq(id as usize, query);
+        if dist >= top_dist[K - 1] {
+            return;
+        }
+
         for pos in 0..K {
             if dist < top_dist[pos] {
                 for shift in (pos + 1..K).rev() {
@@ -222,15 +225,17 @@ impl Index {
         }
     }
 
-    fn vector(&self, id: usize) -> [i16; DIM] {
+    fn distance_sq(&self, id: usize, query: &QuantizedVector) -> i64 {
         let start = self.vectors_offset + id * DIM * 2;
         let bytes = self.mmap.as_slice();
-        let mut out = [0i16; DIM];
-        for (i, slot) in out.iter_mut().enumerate().take(DIM) {
+        let mut sum = 0i64;
+        for (i, value) in query.iter().enumerate().take(DIM) {
             let pos = start + i * 2;
-            *slot = i16::from_le_bytes([bytes[pos], bytes[pos + 1]]);
+            let candidate = i16::from_le_bytes([bytes[pos], bytes[pos + 1]]) as i64;
+            let d = *value as i64 - candidate;
+            sum += d * d;
         }
-        out
+        sum
     }
 
     fn label(&self, id: usize) -> u8 {

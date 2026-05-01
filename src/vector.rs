@@ -3,7 +3,7 @@ use crate::parser::Payload;
 pub const DIM: usize = 14;
 pub const SCALE: i32 = 10_000;
 pub const K: usize = 5;
-pub const BUCKET_COUNT: usize = 4096;
+pub const BUCKET_COUNT: usize = 65_536;
 
 pub type QuantizedVector = [i16; DIM];
 
@@ -63,32 +63,34 @@ pub fn quantize_reference(value: f64) -> i16 {
     }
 }
 
-pub fn distance_sq(a: &QuantizedVector, b: &[i16]) -> i64 {
-    let mut sum = 0i64;
-    let mut i = 0;
-    while i < DIM {
-        let d = a[i] as i64 - b[i] as i64;
-        sum += d * d;
-        i += 1;
-    }
-    sum
-}
-
 pub fn bucket_key(v: &QuantizedVector) -> u16 {
     let amount = bucket8(v[0]);
     let ratio = bucket8(v[2]);
     let km_home = bucket8(v[7]);
+    let tx_count = bucket4(v[8]);
     let hour = bucket4(v[3]);
+    let unknown_merchant = if v[11] > 0 { 1 } else { 0 };
+    let card_present = if v[10] > 0 { 1 } else { 0 };
     let no_last = if v[5] < 0 { 1 } else { 0 };
 
-    (amount | (ratio << 3) | (km_home << 6) | (hour << 9) | (no_last << 11)) as u16
+    (amount
+        | (ratio << 3)
+        | (km_home << 6)
+        | (tx_count << 9)
+        | (hour << 11)
+        | (unknown_merchant << 13)
+        | (card_present << 14)
+        | (no_last << 15)) as u16
 }
 
 pub fn neighbor_keys(query: &QuantizedVector, out: &mut [u16; BUCKET_COUNT]) -> usize {
     let amount = bucket8(query[0]);
     let ratio = bucket8(query[2]);
     let km_home = bucket8(query[7]);
+    let tx_count = bucket4(query[8]);
     let hour = bucket4(query[3]);
+    let unknown_merchant = if query[11] > 0 { 1i32 } else { 0i32 };
+    let card_present = if query[10] > 0 { 1i32 } else { 0i32 };
     let no_last = if query[5] < 0 { 1i32 } else { 0i32 };
     let mut seen = [false; BUCKET_COUNT];
     let mut n = 0usize;
@@ -97,15 +99,35 @@ pub fn neighbor_keys(query: &QuantizedVector, out: &mut [u16; BUCKET_COUNT]) -> 
         for a in (amount - radius).max(0)..=(amount + radius).min(7) {
             for r in (ratio - radius).max(0)..=(ratio + radius).min(7) {
                 for k in (km_home - radius).max(0)..=(km_home + radius).min(7) {
-                    for hr in (hour - radius).max(0)..=(hour + radius).min(3) {
-                        let last_start = if radius >= 2 { 0 } else { no_last };
-                        let last_end = if radius >= 2 { 1 } else { no_last };
-                        for last in last_start..=last_end {
-                            let key = (a | (r << 3) | (k << 6) | (hr << 9) | (last << 11)) as usize;
-                            if !seen[key] {
-                                seen[key] = true;
-                                out[n] = key as u16;
-                                n += 1;
+                    let small_radius = radius.min(3);
+                    for tx in (tx_count - small_radius).max(0)..=(tx_count + small_radius).min(3) {
+                        for hr in (hour - small_radius).max(0)..=(hour + small_radius).min(3) {
+                            let last_start = if radius >= 2 { 0 } else { no_last };
+                            let last_end = if radius >= 2 { 1 } else { no_last };
+                            let unknown_start = if radius >= 3 { 0 } else { unknown_merchant };
+                            let unknown_end = if radius >= 3 { 1 } else { unknown_merchant };
+                            let card_start = if radius >= 3 { 0 } else { card_present };
+                            let card_end = if radius >= 3 { 1 } else { card_present };
+
+                            for unknown in unknown_start..=unknown_end {
+                                for card in card_start..=card_end {
+                                    for last in last_start..=last_end {
+                                        let key = (a
+                                            | (r << 3)
+                                            | (k << 6)
+                                            | (tx << 9)
+                                            | (hr << 11)
+                                            | (unknown << 13)
+                                            | (card << 14)
+                                            | (last << 15))
+                                            as usize;
+                                        if !seen[key] {
+                                            seen[key] = true;
+                                            out[n] = key as u16;
+                                            n += 1;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

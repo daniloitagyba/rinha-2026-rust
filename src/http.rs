@@ -12,6 +12,12 @@ use std::time::Duration;
 const MAX_REQUEST_BYTES: usize = 32 * 1024;
 const DEFAULT_RESPONSE: &[u8] =
     b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}";
+const BODY_APPROVED_0: &[u8] = b"{\"approved\":true,\"fraud_score\":0.0}";
+const BODY_APPROVED_02: &[u8] = b"{\"approved\":true,\"fraud_score\":0.2}";
+const BODY_APPROVED_04: &[u8] = b"{\"approved\":true,\"fraud_score\":0.4}";
+const BODY_REJECTED_06: &[u8] = b"{\"approved\":false,\"fraud_score\":0.6}";
+const BODY_REJECTED_08: &[u8] = b"{\"approved\":false,\"fraud_score\":0.8}";
+const BODY_REJECTED_1: &[u8] = b"{\"approved\":false,\"fraud_score\":1.0}";
 
 pub fn serve() -> Result<(), String> {
     let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
@@ -166,16 +172,30 @@ fn handle_request(
             let query = vectorize(&payload);
             let classify_params = params.for_load(load.load(Ordering::Relaxed));
             let (approved, score) = index.classify(&query, &classify_params);
-            format!(
-                "{{\"approved\":{},\"fraud_score\":{:.1}}}",
-                if approved { "true" } else { "false" },
-                score
-            )
+            fraud_response_body(approved, score)
         }
-        Err(_) => "{\"approved\":true,\"fraud_score\":0.0}".to_string(),
+        Err(_) => BODY_APPROVED_0,
     };
 
-    write_response(stream, b"application/json", response.as_bytes(), keep_alive);
+    write_response(stream, b"application/json", response, keep_alive);
+}
+
+fn fraud_response_body(approved: bool, score: f32) -> &'static [u8] {
+    if approved {
+        if score < 0.1 {
+            BODY_APPROVED_0
+        } else if score < 0.3 {
+            BODY_APPROVED_02
+        } else {
+            BODY_APPROVED_04
+        }
+    } else if score < 0.7 {
+        BODY_REJECTED_06
+    } else if score < 0.9 {
+        BODY_REJECTED_08
+    } else {
+        BODY_REJECTED_1
+    }
 }
 
 fn request_complete(buf: &[u8]) -> Option<(usize, usize)> {

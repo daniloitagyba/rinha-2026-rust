@@ -12,7 +12,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.60"
+          cpus: "0.20"
           memory: "32MB"
 
   api1:
@@ -25,18 +25,18 @@ services:
       PREFETCH_INDEX: "true"
       WORKERS: "2"
       KEEP_ALIVE_REQUESTS: "1"
-      MIN_CANDIDATES: "10000"
-      MAX_CANDIDATES: "40000"
-      OVERLOAD_MIN_CANDIDATES: "10000"
-      OVERLOAD_MAX_CANDIDATES: "40000"
+      MIN_CANDIDATES: "7000"
+      MAX_CANDIDATES: "30000"
+      OVERLOAD_MIN_CANDIDATES: "7000"
+      OVERLOAD_MAX_CANDIDATES: "30000"
       OVERLOAD_THRESHOLD: "1"
-      OVERLOAD_FAST_ONLY: "true"
+      OVERLOAD_FAST_ONLY: "false"
       SEARCH_FALLBACK_LAST_DISTANCE: "2900"
       FAST_PATH: "true"
     deploy:
       resources:
         limits:
-          cpus: "0.20"
+          cpus: "0.40"
           memory: "156MB"
 
   api2:
@@ -49,16 +49,16 @@ services:
       PREFETCH_INDEX: "true"
       WORKERS: "2"
       KEEP_ALIVE_REQUESTS: "1"
-      MIN_CANDIDATES: "10000"
-      MAX_CANDIDATES: "40000"
-      OVERLOAD_MIN_CANDIDATES: "10000"
-      OVERLOAD_MAX_CANDIDATES: "40000"
+      MIN_CANDIDATES: "7000"
+      MAX_CANDIDATES: "30000"
+      OVERLOAD_MIN_CANDIDATES: "7000"
+      OVERLOAD_MAX_CANDIDATES: "30000"
       OVERLOAD_THRESHOLD: "1"
-      OVERLOAD_FAST_ONLY: "true"
+      OVERLOAD_FAST_ONLY: "false"
       SEARCH_FALLBACK_LAST_DISTANCE: "2900"
       FAST_PATH: "true"
     deploy:
       resources:
         limits:
-          cpus: "0.20"
+          cpus: "0.40"
           memory: "156MB"
