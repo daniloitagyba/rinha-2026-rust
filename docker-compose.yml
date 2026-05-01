@@ -1,0 +1,60 @@
+services:
+  lb:
+    image: haproxy:2.9-alpine
+    platform: linux/amd64
+    ports:
+      - "9999:9999"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    depends_on:
+      - api1
+      - api2
+    deploy:
+      resources:
+        limits:
+          cpus: "0.60"
+          memory: "32MB"
+
+  api1:
+    image: ghcr.io/daniloitagyba/rinha-2026-rust:latest
+    platform: linux/amd64
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      INDEX_PATH: /app/data/references.idx
+      PREFETCH_INDEX: "true"
+      WORKERS: "2"
+      KEEP_ALIVE_REQUESTS: "1"
+      MIN_CANDIDATES: "10000"
+      MAX_CANDIDATES: "40000"
+      OVERLOAD_MIN_CANDIDATES: "3000"
+      OVERLOAD_MAX_CANDIDATES: "15000"
+      OVERLOAD_THRESHOLD: "1"
+      OVERLOAD_FAST_ONLY: "true"
+      FAST_PATH: "true"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.20"
+          memory: "156MB"
+
+  api2:
+    image: ghcr.io/daniloitagyba/rinha-2026-rust:latest
+    platform: linux/amd64
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      INDEX_PATH: /app/data/references.idx
+      PREFETCH_INDEX: "true"
+      WORKERS: "2"
+      KEEP_ALIVE_REQUESTS: "1"
+      MIN_CANDIDATES: "10000"
+      MAX_CANDIDATES: "40000"
+      OVERLOAD_MIN_CANDIDATES: "3000"
+      OVERLOAD_MAX_CANDIDATES: "15000"
+      OVERLOAD_THRESHOLD: "1"
+      OVERLOAD_FAST_ONLY: "true"
+      FAST_PATH: "true"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.20"
+          memory: "156MB"
