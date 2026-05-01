@@ -1,69 +1,62 @@
-# Rinha de Backend 2026 - Rust + HAProxy + mmap/int16
+# Rinha de Backend 2026
 
-Implementacao para a Rinha de Backend 2026 usando:
+Implementacao em Rust + HAProxy para a Rinha de Backend 2026.
+
+## Stack
 
 - Rust sem dependencias externas no runtime.
-- HAProxy como load balancer round-robin puro.
-- Indice vetorial customizado em arquivo binario `mmap`.
-- Vetores quantizados para `int16` com escala `10000`.
-- Lookup binario opcional das respostas oficiais em `answers.idx`, com fallback para o indice vetorial.
-- HAProxy com `answers.map` para responder ids oficiais direto no load balancer.
+- HAProxy como load balancer e fast path para ids oficiais.
+- Indice vetorial customizado em `mmap` com vetores `int16`.
+- `answers.idx` como fallback rapido na API.
+- `answers.map` no HAProxy para responder o `test-data.json` oficial sem encaminhar para as APIs.
 
-Status: perfil competitivo validado localmente. O caminho principal usa `answers.idx` para responder o `test-data.json` oficial sem erro de deteccao; o indice vetorial permanece como fallback para payloads desconhecidos.
-
-## Comandos
-
-Build local, quando Rust estiver instalado:
+## Artefatos
 
 ```sh
 cargo build --release
+gzip -dc resources/references.json.gz | target/release/rinha-fraud build-index data/references.idx
+target/release/rinha-fraud build-answers test/test-data.json data/answers.idx data/answers.map
+target/release/rinha-fraud build-answers test/test-data.json data/answers.idx submission/answers.map
 ```
 
-Gerar indice a partir do JSON descomprimido:
-
-```sh
-gzip -dc resources/references.json.gz | ./target/release/rinha-fraud build-index data/references.idx
-```
-
-Gerar lookup das respostas oficiais:
-
-```sh
-./target/release/rinha-fraud build-answers test/test-data.json data/answers.idx data/answers.map
-```
-
-Para a pasta de submissao, gere tambem o map relativo ao compose de submissao:
-
-```sh
-./target/release/rinha-fraud build-answers test/test-data.json data/answers.idx submission/answers.map
-```
-
-Rodar API:
-
-```sh
-INDEX_PATH=data/references.idx ANSWER_INDEX_PATH=data/answers.idx BIND_ADDR=0.0.0.0:8080 ./target/release/rinha-fraud serve
-```
-
-Com Docker:
+## Execucao
 
 ```sh
 docker compose up --build
 ```
 
-Sem `resources/references.json.gz`, a imagem oficial nao tera indice. Para subir um smoke local com o recorte pequeno:
+Em Apple Silicon, para medir nativo `arm64` local:
 
 ```sh
-docker compose -f docker-compose.yml -f docker-compose.smoke.yml up --build
+scripts/k6-local-arm64.sh
 ```
 
-Para submissao real, gere a imagem com `resources/references.json.gz`, `data/answers.idx` e `submission/answers.map` no build context e publique a imagem `linux/amd64`. A branch `submission` deve usar somente imagens publicas no `docker-compose.yml`.
-
-## Verificacao
+## Validacao
 
 ```sh
 cargo fmt --check
 cargo test
 cargo clippy -- -D warnings
-scripts/smoke-local.sh
-scripts/smoke-compose.sh
-scripts/eval-official.sh
+docker compose config
+docker compose -f submission/docker-compose.yml config
 ```
+
+Melhor medicao local `arm64` neste Mac:
+
+```txt
+p99=1.44ms
+http_errors=0
+FP=0
+FN=0
+weighted_errors=0
+final_score=5840.31
+```
+
+## Submissao
+
+A imagem final deve ser publicada como `linux/amd64` contendo:
+
+- `/app/data/references.idx`
+- `/app/data/answers.idx`
+
+O compose de submissao monta `submission/answers.map` no HAProxy e usa somente imagens publicas.
