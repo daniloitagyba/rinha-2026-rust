@@ -16,7 +16,7 @@ services:
           memory: "32MB"
 
   api1:
-    image: ghcr.io/daniloitagyba/rinha-2026-rust:83f68c4fe2274a0afe0b7f71958646b9bfcd682a
+    image: ghcr.io/daniloitagyba/rinha-2026-rust:7fbc60dca6ea78ca271e2a7cc6ec1def48ce0543
     platform: linux/amd64
     environment:
       BIND_ADDR: 0.0.0.0:8080
@@ -26,8 +26,8 @@ services:
       KEEP_ALIVE_REQUESTS: "1"
       MIN_CANDIDATES: "10000"
       MAX_CANDIDATES: "40000"
-      OVERLOAD_MIN_CANDIDATES: "3000"
-      OVERLOAD_MAX_CANDIDATES: "15000"
+      OVERLOAD_MIN_CANDIDATES: "10000"
+      OVERLOAD_MAX_CANDIDATES: "40000"
       OVERLOAD_THRESHOLD: "1"
       OVERLOAD_FAST_ONLY: "true"
       FAST_PATH: "true"
@@ -38,7 +38,7 @@ services:
           memory: "156MB"
 
   api2:
-    image: ghcr.io/daniloitagyba/rinha-2026-rust:83f68c4fe2274a0afe0b7f71958646b9bfcd682a
+    image: ghcr.io/daniloitagyba/rinha-2026-rust:7fbc60dca6ea78ca271e2a7cc6ec1def48ce0543
     platform: linux/amd64
     environment:
       BIND_ADDR: 0.0.0.0:8080
@@ -48,8 +48,8 @@ services:
       KEEP_ALIVE_REQUESTS: "1"
       MIN_CANDIDATES: "10000"
       MAX_CANDIDATES: "40000"
-      OVERLOAD_MIN_CANDIDATES: "3000"
-      OVERLOAD_MAX_CANDIDATES: "15000"
+      OVERLOAD_MIN_CANDIDATES: "10000"
+      OVERLOAD_MAX_CANDIDATES: "40000"
       OVERLOAD_THRESHOLD: "1"
       OVERLOAD_FAST_ONLY: "true"
       FAST_PATH: "true"
