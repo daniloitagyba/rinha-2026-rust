@@ -34,13 +34,14 @@ pub fn serve() -> Result<(), String> {
         .map_err(|e| format!("failed to configure listener: {e}"))?;
 
     eprintln!(
-        "serving on {bind_addr}, index={index_path}, workers={workers}, keep_alive_requests={keep_alive_requests}, accept=direct, min_candidates={}, max_candidates={}, overload_min_candidates={}, overload_max_candidates={}, overload_threshold={}, overload_fast_only={}, flat={}, fast_path={}, fast_only={}",
+        "serving on {bind_addr}, index={index_path}, workers={workers}, keep_alive_requests={keep_alive_requests}, accept=direct, min_candidates={}, max_candidates={}, overload_min_candidates={}, overload_max_candidates={}, overload_threshold={}, overload_fast_only={}, search_fallback_last_distance={}, flat={}, fast_path={}, fast_only={}",
         params.min_candidates,
         params.max_candidates,
         params.overload_min_candidates,
         params.overload_max_candidates,
         params.overload_threshold,
         params.overload_fast_only,
+        params.search_fallback_last_distance,
         params.flat,
         params.fast_path,
         params.fast_only

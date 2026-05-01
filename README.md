@@ -16,7 +16,7 @@ HAProxy encaminha as requisicoes para as APIs e nao executa regra de antifraude.
 A API carrega `/app/data/references.idx` e classifica cada payload por:
 
 - regras rapidas para casos obvios;
-- busca aproximada no indice vetorial para os demais casos.
+- busca aproximada no indice vetorial para casos cinzentos selecionados.
 
 O projeto nao usa `test-data.json`, `expected_approved`, IDs de transacao ou
 artefatos de respostas como lookup no caminho de execucao.
@@ -99,3 +99,7 @@ A imagem final deve ser publicada como `linux/amd64` contendo:
 
 O compose da branch `submission` usa somente imagens publicas e define
 `platform: linux/amd64` para todos os servicos.
+
+O parametro `SEARCH_FALLBACK_LAST_DISTANCE` controla ate qual distancia
+quantizada da ultima transacao um caso cinzento ainda usa busca vetorial antes
+de cair no caminho rapido de rejeicao.

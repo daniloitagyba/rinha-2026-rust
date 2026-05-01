@@ -18,6 +18,7 @@ pub struct SearchParams {
     pub overload_max_candidates: usize,
     pub overload_threshold: usize,
     pub overload_fast_only: bool,
+    pub search_fallback_last_distance: i16,
 }
 
 impl SearchParams {
@@ -27,6 +28,8 @@ impl SearchParams {
         let overload_min_candidates = env_usize("OVERLOAD_MIN_CANDIDATES", 3_000);
         let overload_max_candidates =
             env_usize("OVERLOAD_MAX_CANDIDATES", 15_000).max(overload_min_candidates);
+        let search_fallback_last_distance =
+            env_usize("SEARCH_FALLBACK_LAST_DISTANCE", 2_900).min(i16::MAX as usize) as i16;
 
         Self {
             min_candidates,
@@ -40,6 +43,7 @@ impl SearchParams {
             overload_max_candidates,
             overload_threshold: env_usize("OVERLOAD_THRESHOLD", 8),
             overload_fast_only: env_bool("OVERLOAD_FAST_ONLY", true),
+            search_fallback_last_distance,
         }
     }
 
@@ -148,7 +152,9 @@ impl Index {
                 return (result.0, result.1, true);
             }
         }
-        if params.fast_only && !selective_search_fallback(query) {
+        if params.fast_only
+            && !selective_search_fallback(query, params.search_fallback_last_distance)
+        {
             return (false, 1.0, false);
         }
 
@@ -287,7 +293,7 @@ fn fast_classify(v: &QuantizedVector) -> Option<(bool, f32)> {
         return Some((false, 1.0));
     }
 
-    if likely_fraud_shape(v) {
+    if likely_fraud_shape(v) && !uncertain_fraud_shape(v) {
         return Some((false, 1.0));
     }
 
@@ -307,8 +313,12 @@ fn likely_fraud_shape(v: &QuantizedVector) -> bool {
         || (v[10] == 0 && v[8] >= 4_000 && (v[2] >= 5_000 || v[7] >= 2_000))
 }
 
-fn selective_search_fallback(v: &QuantizedVector) -> bool {
-    v[6] <= 1_200
+fn uncertain_fraud_shape(v: &QuantizedVector) -> bool {
+    v[0] <= 3_000 && v[1] <= 5_833 && v[3] >= 3_000 && v[8] <= 5_500 && v[13] >= 100
+}
+
+fn selective_search_fallback(v: &QuantizedVector, last_distance_threshold: i16) -> bool {
+    v[6] <= last_distance_threshold
 }
 
 fn read_u32(bytes: &[u8], pos: usize) -> Result<u32, String> {
@@ -418,7 +428,7 @@ impl Drop for Mmap {
 
 #[cfg(test)]
 mod tests {
-    use super::{fast_classify, SearchParams};
+    use super::{fast_classify, selective_search_fallback, SearchParams};
     use crate::vector::QuantizedVector;
 
     #[test]
@@ -451,10 +461,19 @@ mod tests {
     #[test]
     fn fast_path_rejects_fraud_shape_without_search() {
         let vector: QuantizedVector = [
-            1_600, 4_167, 5_000, 6_000, 5_000, 500, 400, 1_000, 3_500, 0, 10_000, 0, 5_000, 2_000,
+            1_600, 4_167, 5_000, 2_000, 5_000, 500, 400, 1_000, 3_500, 0, 10_000, 0, 5_000, 50,
         ];
 
         assert_eq!(fast_classify(&vector), Some((false, 1.0)));
+    }
+
+    #[test]
+    fn fast_path_defers_uncertain_fraud_shape_to_search() {
+        let vector: QuantizedVector = [
+            1_600, 4_167, 5_000, 6_000, 5_000, 500, 400, 1_000, 3_500, 0, 10_000, 0, 5_000, 2_000,
+        ];
+
+        assert_eq!(fast_classify(&vector), None);
     }
 
     #[test]
@@ -469,6 +488,7 @@ mod tests {
             overload_max_candidates: 15_000,
             overload_threshold: 8,
             overload_fast_only: true,
+            search_fallback_last_distance: 2_900,
         };
 
         assert!(!params.for_load(7).fast_only);
@@ -476,5 +496,16 @@ mod tests {
         assert!(overloaded.fast_only);
         assert_eq!(overloaded.min_candidates, 3_000);
         assert_eq!(overloaded.max_candidates, 15_000);
+    }
+
+    #[test]
+    fn selective_fallback_uses_last_distance_threshold() {
+        let mut vector: QuantizedVector = [0; 14];
+
+        vector[6] = 2_999;
+        assert!(selective_search_fallback(&vector, 3_000));
+
+        vector[6] = 3_001;
+        assert!(!selective_search_fallback(&vector, 3_000));
     }
 }

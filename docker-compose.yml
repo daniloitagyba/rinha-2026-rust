@@ -31,6 +31,7 @@ services:
       OVERLOAD_MAX_CANDIDATES: "40000"
       OVERLOAD_THRESHOLD: "1"
       OVERLOAD_FAST_ONLY: "true"
+      SEARCH_FALLBACK_LAST_DISTANCE: "2900"
       FAST_PATH: "true"
     deploy:
       resources:
@@ -54,6 +55,7 @@ services:
       OVERLOAD_MAX_CANDIDATES: "40000"
       OVERLOAD_THRESHOLD: "1"
       OVERLOAD_FAST_ONLY: "true"
+      SEARCH_FALLBACK_LAST_DISTANCE: "2900"
       FAST_PATH: "true"
     deploy:
       resources:
