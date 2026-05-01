@@ -16,7 +16,7 @@ services:
           memory: "32MB"
 
   api1:
-    image: ghcr.io/daniloitagyba/rinha-2026-rust:7fbc60dca6ea78ca271e2a7cc6ec1def48ce0543
+    image: ghcr.io/daniloitagyba/rinha-2026-rust:5e8030237675d639b27ffd214731843c0a01b2b8
     platform: linux/amd64
     environment:
       BIND_ADDR: 0.0.0.0:8080
@@ -30,6 +30,7 @@ services:
       OVERLOAD_MAX_CANDIDATES: "40000"
       OVERLOAD_THRESHOLD: "1"
       OVERLOAD_FAST_ONLY: "true"
+      SEARCH_FALLBACK_LAST_DISTANCE: "2900"
       FAST_PATH: "true"
     deploy:
       resources:
@@ -38,7 +39,7 @@ services:
           memory: "156MB"
 
   api2:
-    image: ghcr.io/daniloitagyba/rinha-2026-rust:7fbc60dca6ea78ca271e2a7cc6ec1def48ce0543
+    image: ghcr.io/daniloitagyba/rinha-2026-rust:5e8030237675d639b27ffd214731843c0a01b2b8
     platform: linux/amd64
     environment:
       BIND_ADDR: 0.0.0.0:8080
@@ -52,6 +53,7 @@ services:
       OVERLOAD_MAX_CANDIDATES: "40000"
       OVERLOAD_THRESHOLD: "1"
       OVERLOAD_FAST_ONLY: "true"
+      SEARCH_FALLBACK_LAST_DISTANCE: "2900"
       FAST_PATH: "true"
     deploy:
       resources:
