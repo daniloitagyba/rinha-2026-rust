@@ -1,0 +1,12 @@
+services:
+  api1:
+    build:
+      context: .
+      args:
+        ALLOW_EXAMPLE_INDEX: "1"
+
+  api2:
+    build:
+      context: .
+      args:
+        ALLOW_EXAMPLE_INDEX: "1"

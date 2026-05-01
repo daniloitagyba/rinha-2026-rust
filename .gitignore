@@ -1,0 +1,28 @@
+# Build artifacts
+/target/
+
+# Generated indexes and datasets
+/data/*
+!/data/answers.idx
+!/data/answers.map
+/resources/references.json.gz
+/test/test-data.json
+/test/results.json
+/test/test/results.json
+
+# Local documentation/working notes
+/docs/
+
+# Local environment and editor files
+/.env
+/.env.*
+!/.env.example
+/.vscode/
+/.idea/
+
+# OS and logs
+.DS_Store
+*.log
+
+# Local compose overrides
+/docker-compose.override.yml

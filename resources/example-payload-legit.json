@@ -1,0 +1,24 @@
+{
+  "id": "tx-smoke-legit",
+  "transaction": {
+    "amount": 41.0,
+    "installments": 2,
+    "requested_at": "2026-03-11T18:00:00Z"
+  },
+  "customer": {
+    "avg_amount": 82.0,
+    "tx_count_24h": 3,
+    "known_merchants": ["MERC-001"]
+  },
+  "merchant": {
+    "id": "MERC-001",
+    "mcc": "5411",
+    "avg_amount": 60.0
+  },
+  "terminal": {
+    "is_online": false,
+    "card_present": true,
+    "km_from_home": 29.2
+  },
+  "last_transaction": null
+}
