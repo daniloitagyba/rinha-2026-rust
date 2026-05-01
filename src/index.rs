@@ -149,7 +149,7 @@ impl Index {
             }
         }
         if params.fast_only {
-            return (true, 0.0, false);
+            return (false, 1.0, false);
         }
 
         let mut top_dist = [i64::MAX; K];
