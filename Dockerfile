@@ -12,7 +12,6 @@ RUN if [ "$ALLOW_EXAMPLE_INDEX" = "1" ] && [ -f resources/example-references.jso
     elif [ -f resources/references.json.gz ]; then \
       gzip -dc resources/references.json.gz | /out/app/rinha-fraud build-index /out/data/references.idx ; \
     fi
-RUN if [ -f data/answers.idx ]; then cp data/answers.idx /out/data/answers.idx ; fi
 
 FROM debian:bookworm-slim
 
@@ -23,7 +22,6 @@ COPY docker/entrypoint.sh /entrypoint.sh
 
 ENV BIND_ADDR=0.0.0.0:8080
 ENV INDEX_PATH=/app/data/references.idx
-ENV ANSWER_INDEX_PATH=/app/data/answers.idx
 ENV WORKERS=1
 ENV MIN_CANDIDATES=30000
 ENV MAX_CANDIDATES=120000

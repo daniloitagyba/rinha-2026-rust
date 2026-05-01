@@ -1,5 +1,3 @@
-mod answers;
-mod build_answers;
 mod build_index;
 mod eval;
 mod http;
@@ -28,18 +26,6 @@ fn run() -> Result<(), String> {
                 .ok_or_else(|| "usage: rinha-fraud build-index <output.idx>".to_string())?;
             build_index::run(&output)
         }
-        Some("build-answers") => {
-            let input = args.next().ok_or_else(|| {
-                "usage: rinha-fraud build-answers <test-data.json> <output.idx> [output.map]"
-                    .to_string()
-            })?;
-            let output = args.next().ok_or_else(|| {
-                "usage: rinha-fraud build-answers <test-data.json> <output.idx> [output.map]"
-                    .to_string()
-            })?;
-            let map_output = args.next();
-            build_answers::run(&input, &output, map_output.as_deref())
-        }
         Some("eval") => {
             let input = args
                 .next()
@@ -51,7 +37,6 @@ fn run() -> Result<(), String> {
             println!("usage:");
             println!("  rinha-fraud serve");
             println!("  rinha-fraud build-index <output.idx> < references.json");
-            println!("  rinha-fraud build-answers <test-data.json> <output.idx> [output.map]");
             println!("  rinha-fraud eval <test-data.json>");
             Ok(())
         }

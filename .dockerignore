@@ -1,6 +1,5 @@
 target
 .git
 data/*
-!data/answers.idx
 test/test-data.json
 test/results.json

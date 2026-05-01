@@ -5,18 +5,14 @@ Implementacao em Rust + HAProxy para a Rinha de Backend 2026.
 ## Stack
 
 - Rust sem dependencias externas no runtime.
-- HAProxy como load balancer e fast path para ids oficiais.
+- HAProxy apenas como load balancer.
 - Indice vetorial customizado em `mmap` com vetores `int16`.
-- `answers.idx` como fallback rapido na API.
-- `answers.map` no HAProxy para responder o `test-data.json` oficial sem encaminhar para as APIs.
 
 ## Artefatos
 
 ```sh
 cargo build --release
 gzip -dc resources/references.json.gz | target/release/rinha-fraud build-index data/references.idx
-target/release/rinha-fraud build-answers test/test-data.json data/answers.idx data/answers.map
-target/release/rinha-fraud build-answers test/test-data.json data/answers.idx submission/answers.map
 ```
 
 ## Execucao
@@ -57,6 +53,5 @@ final_score=5840.31
 A imagem final deve ser publicada como `linux/amd64` contendo:
 
 - `/app/data/references.idx`
-- `/app/data/answers.idx`
 
-O compose de submissao monta `submission/answers.map` no HAProxy e usa somente imagens publicas.
+O compose de submissao usa somente imagens publicas.

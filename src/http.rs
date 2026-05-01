@@ -1,23 +1,15 @@
-use crate::answers::{parse_tx_id_from_json, AnswerIndex};
 use crate::index::{Index, SearchParams};
 use crate::parser::parse_payload;
 use crate::vector::vectorize;
 use std::env;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 const MAX_REQUEST_BYTES: usize = 32 * 1024;
-const APPROVED_BODY: &[u8] = b"{\"approved\":true,\"fraud_score\":0.0}";
-const DENIED_BODY: &[u8] = b"{\"approved\":false,\"fraud_score\":1.0}";
-const APPROVED_CLOSE_RESPONSE: &[u8] =
-    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}";
-const DENIED_CLOSE_RESPONSE: &[u8] =
-    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}";
 const DEFAULT_RESPONSE: &[u8] =
     b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}";
 
@@ -25,13 +17,10 @@ pub fn serve() -> Result<(), String> {
     let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let index_path =
         env::var("INDEX_PATH").unwrap_or_else(|_| "/app/data/references.idx".to_string());
-    let answer_index_path =
-        env::var("ANSWER_INDEX_PATH").unwrap_or_else(|_| "/app/data/answers.idx".to_string());
     let workers = env_usize("WORKERS", 1).max(1);
     let keep_alive_requests = env_usize("KEEP_ALIVE_REQUESTS", 128).max(1);
     let params = Arc::new(SearchParams::from_env());
     let index = Arc::new(Index::open(&index_path)?);
-    let answer_index = Arc::new(load_answer_index(&answer_index_path)?);
     if env_bool("PREFETCH_INDEX", true) {
         let checksum = index.prefault();
         eprintln!("prefetched index pages, checksum={checksum}");
@@ -45,8 +34,7 @@ pub fn serve() -> Result<(), String> {
         .map_err(|e| format!("failed to configure listener: {e}"))?;
 
     eprintln!(
-        "serving on {bind_addr}, index={index_path}, answer_index={}, workers={workers}, keep_alive_requests={keep_alive_requests}, accept=direct, min_candidates={}, max_candidates={}, overload_min_candidates={}, overload_max_candidates={}, overload_threshold={}, overload_fast_only={}, flat={}, fast_path={}, fast_only={}",
-        if answer_index.is_some() { "enabled" } else { "disabled" },
+        "serving on {bind_addr}, index={index_path}, workers={workers}, keep_alive_requests={keep_alive_requests}, accept=direct, min_candidates={}, max_candidates={}, overload_min_candidates={}, overload_max_candidates={}, overload_threshold={}, overload_fast_only={}, flat={}, fast_path={}, fast_only={}",
         params.min_candidates,
         params.max_candidates,
         params.overload_min_candidates,
@@ -63,7 +51,6 @@ pub fn serve() -> Result<(), String> {
     for _ in 0..workers {
         let listener = Arc::clone(&listener);
         let index = Arc::clone(&index);
-        let answer_index = Arc::clone(&answer_index);
         let params = Arc::clone(&params);
         let load = Arc::clone(&load);
         thread::spawn(move || loop {
@@ -72,14 +59,7 @@ pub fn serve() -> Result<(), String> {
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
                     let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
                     load.fetch_add(1, Ordering::Relaxed);
-                    handle_connection(
-                        stream,
-                        &index,
-                        answer_index.as_ref().as_ref(),
-                        &params,
-                        &load,
-                        keep_alive_requests,
-                    );
+                    handle_connection(stream, &index, &params, &load, keep_alive_requests);
                     load.fetch_sub(1, Ordering::Relaxed);
                 }
                 Err(err) => eprintln!("accept error: {err}"),
@@ -95,7 +75,6 @@ pub fn serve() -> Result<(), String> {
 fn handle_connection(
     mut stream: TcpStream,
     index: &Index,
-    answer_index: Option<&AnswerIndex>,
     params: &SearchParams,
     load: &AtomicUsize,
     keep_alive_requests: usize,
@@ -132,7 +111,6 @@ fn handle_connection(
             &mut stream,
             &buf[..request_end],
             index,
-            answer_index,
             params,
             load,
             keep_alive,
@@ -156,7 +134,6 @@ fn handle_request(
     stream: &mut TcpStream,
     request: &[u8],
     index: &Index,
-    answer_index: Option<&AnswerIndex>,
     params: &SearchParams,
     load: &AtomicUsize,
     keep_alive: bool,
@@ -181,12 +158,6 @@ fn handle_request(
     let body_end = body_start.saturating_add(content_len).min(request.len());
     let body_bytes = &request[body_start..body_end];
 
-    if let Some(approved) = answer_index
-        .and_then(|answers| parse_tx_id_from_json(body_bytes).and_then(|id| answers.lookup_id(id)))
-    {
-        return write_decision_response(stream, approved, keep_alive);
-    }
-
     let body = std::str::from_utf8(body_bytes).unwrap_or("");
 
     let response = match parse_payload(body) {
@@ -204,13 +175,6 @@ fn handle_request(
     };
 
     write_response(stream, b"application/json", response.as_bytes(), keep_alive);
-}
-
-fn load_answer_index(path: &str) -> Result<Option<AnswerIndex>, String> {
-    if !Path::new(path).exists() {
-        return Ok(None);
-    }
-    AnswerIndex::open(path).map(Some)
 }
 
 fn request_complete(buf: &[u8]) -> Option<(usize, usize)> {
@@ -266,21 +230,6 @@ fn write_response(stream: &mut TcpStream, content_type: &[u8], body: &[u8], keep
         body.len()
     );
     let _ = stream.write_all(body);
-}
-
-fn write_decision_response(stream: &mut TcpStream, approved: bool, keep_alive: bool) {
-    if !keep_alive {
-        let response = if approved {
-            APPROVED_CLOSE_RESPONSE
-        } else {
-            DENIED_CLOSE_RESPONSE
-        };
-        let _ = stream.write_all(response);
-        return;
-    }
-
-    let body = if approved { APPROVED_BODY } else { DENIED_BODY };
-    write_response(stream, b"application/json", body, keep_alive);
 }
 
 fn write_status(stream: &mut TcpStream, code: u16, body: &[u8], keep_alive: bool) {

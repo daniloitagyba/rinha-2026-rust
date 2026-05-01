@@ -1,5 +1,4 @@
 pub struct Payload<'a> {
-    pub id: &'a str,
     pub amount: f64,
     pub installments: f64,
     pub requested_at: &'a str,
@@ -35,7 +34,6 @@ pub fn parse_payload(body: &str) -> Result<Payload<'_>, &'static str> {
     };
 
     Ok(Payload {
-        id: string_field(body, "\"id\"").ok_or("missing id")?,
         amount: number_field(transaction, "\"amount\"").ok_or("missing amount")?,
         installments: number_field(transaction, "\"installments\"")
             .ok_or("missing installments")?,

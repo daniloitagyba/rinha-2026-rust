@@ -1,20 +1,15 @@
-use crate::answers::{parse_tx_id_from_json, AnswerIndex};
 use crate::index::{Index, SearchParams};
 use crate::parser::parse_payload;
 use crate::vector::vectorize;
 use std::env;
 use std::fs;
-use std::path::Path;
 use std::time::Instant;
 
 pub fn run(input: &str) -> Result<(), String> {
     let index_path = env::var("INDEX_PATH").unwrap_or_else(|_| "data/references.idx".to_string());
-    let answer_index_path =
-        env::var("ANSWER_INDEX_PATH").unwrap_or_else(|_| "data/answers.idx".to_string());
     let limit = env_usize("EVAL_LIMIT", usize::MAX);
     let data = fs::read_to_string(input).map_err(|e| format!("failed to read {input}: {e}"))?;
     let index = Index::open(&index_path)?;
-    let answer_index = load_answer_index(&answer_index_path)?;
     let params = SearchParams::from_env();
 
     let mut cursor = 0usize;
@@ -24,7 +19,6 @@ pub fn run(input: &str) -> Result<(), String> {
     let mut fn_ = 0usize;
     let mut parse_errors = 0usize;
     let mut fast_path_hits = 0usize;
-    let mut answer_hits = 0usize;
     let mut latencies_ns = Vec::new();
     let started = Instant::now();
 
@@ -45,50 +39,26 @@ pub fn run(input: &str) -> Result<(), String> {
         let expected = bool_after_key(&data, expected_pos)
             .ok_or_else(|| "bad expected_approved".to_string())?;
 
-        let request_bytes = &data.as_bytes()[request_start..=request_end];
         let item_started = Instant::now();
-        if let Some(approved) = answer_index.as_ref().and_then(|answers| {
-            parse_tx_id_from_json(request_bytes).and_then(|id| answers.lookup_id(id))
-        }) {
-            latencies_ns.push(item_started.elapsed().as_nanos());
-            answer_hits += 1;
-            if approved == expected {
-                correct += 1;
-            } else if approved {
-                fn_ += 1;
-            } else {
-                fp += 1;
-            }
-        } else {
-            match parse_payload(&data[request_start..=request_end]) {
-                Ok(payload) => {
-                    let (approved, fast_path_hit) = if let Some(approved) = answer_index
-                        .as_ref()
-                        .and_then(|answers| answers.lookup(payload.id))
-                    {
-                        answer_hits += 1;
-                        (approved, false)
-                    } else {
-                        let query = vectorize(&payload);
-                        let (approved, _, fast_path_hit) = index.classify_detailed(&query, &params);
-                        (approved, fast_path_hit)
-                    };
-                    latencies_ns.push(item_started.elapsed().as_nanos());
-                    if fast_path_hit {
-                        fast_path_hits += 1;
-                    }
+        match parse_payload(&data[request_start..=request_end]) {
+            Ok(payload) => {
+                let query = vectorize(&payload);
+                let (approved, _, fast_path_hit) = index.classify_detailed(&query, &params);
+                latencies_ns.push(item_started.elapsed().as_nanos());
+                if fast_path_hit {
+                    fast_path_hits += 1;
+                }
 
-                    if approved == expected {
-                        correct += 1;
-                    } else if approved {
-                        fn_ += 1;
-                    } else {
-                        fp += 1;
-                    }
+                if approved == expected {
+                    correct += 1;
+                } else if approved {
+                    fn_ += 1;
+                } else {
+                    fp += 1;
                 }
-                Err(_) => {
-                    parse_errors += 1;
-                }
+            }
+            Err(_) => {
+                parse_errors += 1;
             }
         }
 
@@ -139,7 +109,7 @@ pub fn run(input: &str) -> Result<(), String> {
         params.fast_only
     );
     println!(
-        "total={total} measured={measured} correct={correct} accuracy={accuracy:.6} answer_hits={answer_hits} fast_path_hits={fast_path_hits}"
+        "total={total} measured={measured} correct={correct} accuracy={accuracy:.6} fast_path_hits={fast_path_hits}"
     );
     println!(
         "fp={fp} fn={fn_} parse_errors={parse_errors} weighted_errors={weighted_errors} failure_rate={failure_rate:.6} score_det={score_det:.2}"
@@ -222,13 +192,6 @@ fn env_usize(name: &str, default: usize) -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(default)
-}
-
-fn load_answer_index(path: &str) -> Result<Option<AnswerIndex>, String> {
-    if !Path::new(path).exists() {
-        return Ok(None);
-    }
-    AnswerIndex::open(path).map(Some)
 }
 
 fn detection_score(weighted_errors: usize, failure_rate: f64, epsilon: f64) -> f64 {

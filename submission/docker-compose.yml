@@ -6,7 +6,6 @@ services:
       - "9999:9999"
     volumes:
       - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-      - ./answers.map:/usr/local/etc/haproxy/answers.map:ro
     depends_on:
       - api1
       - api2
@@ -22,7 +21,6 @@ services:
     environment:
       BIND_ADDR: 0.0.0.0:8080
       INDEX_PATH: /app/data/references.idx
-      ANSWER_INDEX_PATH: /app/data/answers.idx
       PREFETCH_INDEX: "true"
       WORKERS: "2"
       KEEP_ALIVE_REQUESTS: "1"
@@ -45,7 +43,6 @@ services:
     environment:
       BIND_ADDR: 0.0.0.0:8080
       INDEX_PATH: /app/data/references.idx
-      ANSWER_INDEX_PATH: /app/data/answers.idx
       PREFETCH_INDEX: "true"
       WORKERS: "2"
       KEEP_ALIVE_REQUESTS: "1"
