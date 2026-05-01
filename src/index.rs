@@ -148,7 +148,7 @@ impl Index {
                 return (result.0, result.1, true);
             }
         }
-        if params.fast_only {
+        if params.fast_only && !selective_search_fallback(query) {
             return (false, 1.0, false);
         }
 
@@ -305,6 +305,10 @@ fn likely_fraud_shape(v: &QuantizedVector) -> bool {
         || (v[0] >= 1_500 && v[1] >= 4_167 && v[8] >= 3_500)
         || (v[9] == 10_000 && v[10] == 0 && v[11] == 10_000 && v[8] >= 3_000)
         || (v[10] == 0 && v[8] >= 4_000 && (v[2] >= 5_000 || v[7] >= 2_000))
+}
+
+fn selective_search_fallback(v: &QuantizedVector) -> bool {
+    v[6] <= 1_200
 }
 
 fn read_u32(bytes: &[u8], pos: usize) -> Result<u32, String> {
