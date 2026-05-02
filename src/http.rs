@@ -1,4 +1,4 @@
-use crate::index::{Index, SearchParams};
+use crate::index::{exact_fallback_name, Index, SearchParams};
 use crate::parser::parse_payload;
 use crate::vector::vectorize;
 use std::env;
@@ -18,6 +18,16 @@ const BODY_APPROVED_04: &[u8] = b"{\"approved\":true,\"fraud_score\":0.4}";
 const BODY_REJECTED_06: &[u8] = b"{\"approved\":false,\"fraud_score\":0.6}";
 const BODY_REJECTED_08: &[u8] = b"{\"approved\":false,\"fraud_score\":0.8}";
 const BODY_REJECTED_1: &[u8] = b"{\"approved\":false,\"fraud_score\":1.0}";
+const RESPONSE_APPROVED_02_CLOSE: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}";
+const RESPONSE_APPROVED_04_CLOSE: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.4}";
+const RESPONSE_REJECTED_06_CLOSE: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}";
+const RESPONSE_REJECTED_08_CLOSE: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}";
+const RESPONSE_REJECTED_1_CLOSE: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}";
 
 pub fn serve() -> Result<(), String> {
     let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
@@ -40,9 +50,14 @@ pub fn serve() -> Result<(), String> {
         .map_err(|e| format!("failed to configure listener: {e}"))?;
 
     eprintln!(
-        "serving on {bind_addr}, index={index_path}, workers={workers}, keep_alive_requests={keep_alive_requests}, accept=direct, min_candidates={}, max_candidates={}, overload_min_candidates={}, overload_max_candidates={}, overload_threshold={}, overload_fast_only={}, search_fallback_last_distance={}, flat={}, fast_path={}, fast_only={}",
+        "serving on {bind_addr}, index={index_path}, workers={workers}, keep_alive_requests={keep_alive_requests}, accept=direct, early_candidates={}, min_candidates={}, max_candidates={}, profile_fastpath={}, profile_min_count={}, exact_fallback={}, risky_fallback_refs={}, overload_min_candidates={}, overload_max_candidates={}, overload_threshold={}, overload_fast_only={}, search_fallback_last_distance={}, flat={}, fast_path={}, fast_only={}",
+        params.early_candidates,
         params.min_candidates,
         params.max_candidates,
+        params.profile_fast_path,
+        params.profile_min_count,
+        exact_fallback_name(params.exact_fallback),
+        index.risky_fallback_count(),
         params.overload_min_candidates,
         params.overload_max_candidates,
         params.overload_threshold,
@@ -177,7 +192,7 @@ fn handle_request(
         Err(_) => BODY_APPROVED_0,
     };
 
-    write_response(stream, b"application/json", response, keep_alive);
+    write_fraud_response(stream, response, keep_alive);
 }
 
 fn fraud_response_body(approved: bool, score: f32) -> &'static [u8] {
@@ -196,6 +211,28 @@ fn fraud_response_body(approved: bool, score: f32) -> &'static [u8] {
     } else {
         BODY_REJECTED_1
     }
+}
+
+fn write_fraud_response(stream: &mut TcpStream, body: &[u8], keep_alive: bool) {
+    if keep_alive {
+        write_response(stream, b"application/json", body, true);
+        return;
+    }
+
+    let full_response = if body == BODY_APPROVED_0 {
+        DEFAULT_RESPONSE
+    } else if body == BODY_APPROVED_02 {
+        RESPONSE_APPROVED_02_CLOSE
+    } else if body == BODY_APPROVED_04 {
+        RESPONSE_APPROVED_04_CLOSE
+    } else if body == BODY_REJECTED_06 {
+        RESPONSE_REJECTED_06_CLOSE
+    } else if body == BODY_REJECTED_08 {
+        RESPONSE_REJECTED_08_CLOSE
+    } else {
+        RESPONSE_REJECTED_1_CLOSE
+    };
+    let _ = stream.write_all(full_response);
 }
 
 fn request_complete(buf: &[u8]) -> Option<(usize, usize)> {

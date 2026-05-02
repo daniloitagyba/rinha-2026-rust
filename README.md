@@ -15,8 +15,9 @@ HAProxy encaminha as requisicoes para as APIs e nao executa regra de antifraude.
 
 A API carrega `/app/data/references.idx` e classifica cada payload por:
 
-- regras rapidas para casos obvios;
-- busca aproximada no indice vetorial para casos cinzentos selecionados.
+- profile fast path derivado das referencias oficiais, sem usar massa de teste;
+- busca aproximada no indice vetorial;
+- fallback exato seletivo em regioes de maior risco/fronteira.
 
 O projeto nao usa `test-data.json`, `expected_approved`, IDs de transacao ou
 artefatos de respostas como lookup no caminho de execucao.
@@ -50,10 +51,14 @@ Smoke com Docker Compose:
 scripts/smoke-compose.sh
 ```
 
-Em Apple Silicon, para medir nativo `arm64`:
+Teste local proximo da engine, sempre mirando a topologia `linux/amd64`:
+
+```powershell
+.\scripts\k6-local.ps1
+```
 
 ```sh
-scripts/k6-local-arm64.sh
+MODE=build sh scripts/k6-local.sh
 ```
 
 ## Validacao
@@ -75,6 +80,9 @@ scripts/eval-official.sh
 Esse script baixa `resources/references.json.gz` e `test/test-data.json` quando
 necessario. O arquivo de teste e usado apenas pelo avaliador local, nao entra na
 imagem final e nao e montado no compose de submissao.
+
+O avaliador local aceita `EVAL_ERRORS_PATH` e `EVAL_DUMP_PATH` para investigar
+FP/FN, vetor quantizado, contagem de fraudes do top-5 e caminho de decisao.
 
 ## Estrutura de branches
 
@@ -100,6 +108,6 @@ A imagem final deve ser publicada como `linux/amd64` contendo:
 O compose da branch `submission` usa somente imagens publicas e define
 `platform: linux/amd64` para todos os servicos.
 
-O parametro `SEARCH_FALLBACK_LAST_DISTANCE` controla ate qual distancia
-quantizada da ultima transacao um caso cinzento ainda usa busca vetorial antes
-de cair no caminho rapido de rejeicao.
+O perfil padrao usa `PROFILE_FASTPATH=1`, `EXACT_FALLBACK=risky`,
+`WORKERS=1` e `EARLY_CANDIDATES/MIN_CANDIDATES/MAX_CANDIDATES=16200/16200/32400`.
+`FAST_PATH=false` deixa as heuristicas manuais desligadas por padrao.

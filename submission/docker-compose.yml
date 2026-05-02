@@ -12,7 +12,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.20"
+          cpus: "0.15"
           memory: "32MB"
 
   api1:
@@ -22,20 +22,19 @@ services:
       BIND_ADDR: 0.0.0.0:8080
       INDEX_PATH: /app/data/references.idx
       PREFETCH_INDEX: "true"
-      WORKERS: "2"
+      WORKERS: "1"
       KEEP_ALIVE_REQUESTS: "1"
-      MIN_CANDIDATES: "7000"
-      MAX_CANDIDATES: "30000"
-      OVERLOAD_MIN_CANDIDATES: "7000"
-      OVERLOAD_MAX_CANDIDATES: "30000"
-      OVERLOAD_THRESHOLD: "1"
-      OVERLOAD_FAST_ONLY: "false"
-      SEARCH_FALLBACK_LAST_DISTANCE: "2900"
-      FAST_PATH: "true"
+      EARLY_CANDIDATES: "16200"
+      MIN_CANDIDATES: "16200"
+      MAX_CANDIDATES: "32400"
+      PROFILE_FASTPATH: "1"
+      PROFILE_MIN_COUNT: "20"
+      EXACT_FALLBACK: "risky"
+      FAST_PATH: "false"
     deploy:
       resources:
         limits:
-          cpus: "0.40"
+          cpus: "0.425"
           memory: "156MB"
 
   api2:
@@ -45,18 +44,17 @@ services:
       BIND_ADDR: 0.0.0.0:8080
       INDEX_PATH: /app/data/references.idx
       PREFETCH_INDEX: "true"
-      WORKERS: "2"
+      WORKERS: "1"
       KEEP_ALIVE_REQUESTS: "1"
-      MIN_CANDIDATES: "7000"
-      MAX_CANDIDATES: "30000"
-      OVERLOAD_MIN_CANDIDATES: "7000"
-      OVERLOAD_MAX_CANDIDATES: "30000"
-      OVERLOAD_THRESHOLD: "1"
-      OVERLOAD_FAST_ONLY: "false"
-      SEARCH_FALLBACK_LAST_DISTANCE: "2900"
-      FAST_PATH: "true"
+      EARLY_CANDIDATES: "16200"
+      MIN_CANDIDATES: "16200"
+      MAX_CANDIDATES: "32400"
+      PROFILE_FASTPATH: "1"
+      PROFILE_MIN_COUNT: "20"
+      EXACT_FALLBACK: "risky"
+      FAST_PATH: "false"
     deploy:
       resources:
         limits:
-          cpus: "0.40"
+          cpus: "0.425"
           memory: "156MB"

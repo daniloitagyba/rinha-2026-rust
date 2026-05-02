@@ -1,4 +1,4 @@
-use crate::vector::{bucket_key, quantize_reference, BUCKET_COUNT, DIM, SCALE};
+use crate::vector::{bucket_key, quantize_reference, QuantizedVector, BUCKET_COUNT, DIM, SCALE};
 use std::fs::{create_dir_all, File};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -17,8 +17,8 @@ pub fn run(output: &str) -> Result<(), String> {
     let mut file = File::create(output).map_err(|e| format!("failed to create {output}: {e}"))?;
     file.write_all(&[0u8; HEADER_LEN])
         .map_err(|e| format!("failed to reserve header: {e}"))?;
-    let vectors_offset = file.stream_position().map_err(|e| e.to_string())?;
 
+    let mut vectors: Vec<QuantizedVector> = Vec::new();
     let mut labels: Vec<u8> = Vec::new();
     let mut keys: Vec<u16> = Vec::new();
     let mut bucket_counts = [0u32; BUCKET_COUNT];
@@ -45,10 +45,7 @@ pub fn run(output: &str) -> Result<(), String> {
         let key = bucket_key(&qvec) as usize;
         bucket_counts[key] += 1;
 
-        for value in &qvec {
-            file.write_all(&value.to_le_bytes())
-                .map_err(|e| format!("failed to write vectors: {e}"))?;
-        }
+        vectors.push(qvec);
         labels.push(label);
         keys.push(key as u16);
     }
@@ -70,9 +67,20 @@ pub fn run(output: &str) -> Result<(), String> {
         write_positions[*key as usize] += 1;
     }
 
+    let vectors_offset = file.stream_position().map_err(|e| e.to_string())?;
+    for original_id in &items {
+        let vector = &vectors[*original_id as usize];
+        for value in vector {
+            file.write_all(&value.to_le_bytes())
+                .map_err(|e| format!("failed to write vectors: {e}"))?;
+        }
+    }
+
     let labels_offset = file.stream_position().map_err(|e| e.to_string())?;
-    file.write_all(&labels)
-        .map_err(|e| format!("failed to write labels: {e}"))?;
+    for original_id in &items {
+        file.write_all(&[labels[*original_id as usize]])
+            .map_err(|e| format!("failed to write labels: {e}"))?;
+    }
 
     let bucket_offsets_offset = file.stream_position().map_err(|e| e.to_string())?;
     for value in &offsets {
@@ -81,7 +89,7 @@ pub fn run(output: &str) -> Result<(), String> {
     }
 
     let bucket_items_offset = file.stream_position().map_err(|e| e.to_string())?;
-    for value in &items {
+    for value in 0..labels.len() as u32 {
         file.write_all(&value.to_le_bytes())
             .map_err(|e| format!("failed to write bucket items: {e}"))?;
     }
@@ -98,7 +106,7 @@ pub fn run(output: &str) -> Result<(), String> {
         file_len,
     )?;
     eprintln!(
-        "indexed {} vectors into {} ({} buckets, {} bytes)",
+        "indexed {} vectors into {} ({} clustered buckets, {} bytes)",
         labels.len(),
         output,
         BUCKET_COUNT,

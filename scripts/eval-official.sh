@@ -25,7 +25,11 @@ if [ "${REBUILD_INDEX:-0}" = "1" ] || [ ! -f data/references.idx ] || [ "$index_
 fi
 
 INDEX_PATH="${INDEX_PATH:-data/references.idx}" \
-MIN_CANDIDATES="${MIN_CANDIDATES:-30000}" \
-MAX_CANDIDATES="${MAX_CANDIDATES:-120000}" \
-FAST_PATH="${FAST_PATH:-true}" \
+EARLY_CANDIDATES="${EARLY_CANDIDATES:-16200}" \
+MIN_CANDIDATES="${MIN_CANDIDATES:-16200}" \
+MAX_CANDIDATES="${MAX_CANDIDATES:-32400}" \
+PROFILE_FASTPATH="${PROFILE_FASTPATH:-1}" \
+PROFILE_MIN_COUNT="${PROFILE_MIN_COUNT:-20}" \
+EXACT_FALLBACK="${EXACT_FALLBACK:-risky}" \
+FAST_PATH="${FAST_PATH:-false}" \
 target/release/rinha-fraud eval test/test-data.json

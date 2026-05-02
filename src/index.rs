@@ -1,4 +1,6 @@
-use crate::vector::{neighbor_keys, QuantizedVector, BUCKET_COUNT, DIM, K};
+use crate::vector::{
+    bucket16, bucket4, bucket8, neighbor_keys, QuantizedVector, BUCKET_COUNT, DIM, K,
+};
 use std::env;
 use std::fs::File;
 use std::io;
@@ -6,14 +8,26 @@ use std::path::Path;
 
 const MAGIC: &[u8; 8] = b"RINHA26I";
 const HEADER_LEN: usize = 80;
+const PROFILE_KEY_COUNT: usize = 1 << 22;
+const LEGIT_MASK: u8 = 1;
+const FRAUD_MASK: u8 = 2;
+
+const EXACT_FALLBACK_OFF: u8 = 0;
+const EXACT_FALLBACK_UNCERTAIN: u8 = 1;
+const EXACT_FALLBACK_RISKY: u8 = 2;
+const EXACT_FALLBACK_PROFILE_MISS: u8 = 3;
 
 #[derive(Clone, Copy)]
 pub struct SearchParams {
+    pub early_candidates: usize,
     pub min_candidates: usize,
     pub max_candidates: usize,
     pub flat: bool,
     pub fast_path: bool,
     pub fast_only: bool,
+    pub profile_fast_path: bool,
+    pub profile_min_count: usize,
+    pub exact_fallback: u8,
     pub overload_min_candidates: usize,
     pub overload_max_candidates: usize,
     pub overload_threshold: usize,
@@ -23,8 +37,11 @@ pub struct SearchParams {
 
 impl SearchParams {
     pub fn from_env() -> Self {
-        let min_candidates = env_usize("MIN_CANDIDATES", 30_000);
-        let max_candidates = env_usize("MAX_CANDIDATES", 120_000).max(min_candidates);
+        let min_candidates = env_usize("MIN_CANDIDATES", 16_200).max(K);
+        let max_candidates = env_usize("MAX_CANDIDATES", 32_400).max(min_candidates);
+        let early_candidates = env_usize("EARLY_CANDIDATES", min_candidates)
+            .max(K)
+            .min(min_candidates);
         let overload_min_candidates = env_usize("OVERLOAD_MIN_CANDIDATES", 3_000);
         let overload_max_candidates =
             env_usize("OVERLOAD_MAX_CANDIDATES", 15_000).max(overload_min_candidates);
@@ -32,16 +49,20 @@ impl SearchParams {
             env_usize("SEARCH_FALLBACK_LAST_DISTANCE", 2_900).min(i16::MAX as usize) as i16;
 
         Self {
+            early_candidates,
             min_candidates,
             max_candidates,
             flat: env::var("SEARCH_MODE")
                 .map(|v| v == "flat")
                 .unwrap_or(false),
-            fast_path: env_bool("FAST_PATH", true),
+            fast_path: env_bool("FAST_PATH", false),
             fast_only: env_bool("FAST_ONLY", false),
+            profile_fast_path: env_bool("PROFILE_FASTPATH", true),
+            profile_min_count: env_usize("PROFILE_MIN_COUNT", 20).max(1),
+            exact_fallback: exact_fallback_mode(env::var("EXACT_FALLBACK").ok().as_deref()),
             overload_min_candidates,
             overload_max_candidates,
-            overload_threshold: env_usize("OVERLOAD_THRESHOLD", 8),
+            overload_threshold: env_usize("OVERLOAD_THRESHOLD", 0),
             overload_fast_only: env_bool("OVERLOAD_FAST_ONLY", true),
             search_fallback_last_distance,
         }
@@ -53,8 +74,13 @@ impl SearchParams {
         }
 
         let mut params = *self;
+        params.early_candidates = self.overload_min_candidates.min(self.early_candidates);
         params.min_candidates = self.overload_min_candidates.min(self.min_candidates);
         params.max_candidates = self.overload_max_candidates.min(self.max_candidates);
+        if params.early_candidates > params.min_candidates {
+            params.early_candidates = params.min_candidates;
+        }
+        params.early_candidates = params.early_candidates.max(K);
         if params.max_candidates < params.min_candidates {
             params.max_candidates = params.min_candidates;
         }
@@ -70,6 +96,30 @@ pub struct Index {
     labels_offset: usize,
     bucket_offsets_offset: usize,
     bucket_items_offset: usize,
+    profile_counts: Vec<u16>,
+    profile_label_masks: Vec<u8>,
+    risky_fallback_ids: Vec<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DecisionKind {
+    ProfileFast,
+    RuleFast,
+    Approx,
+    ExactFlat,
+    ExactRisky,
+}
+
+impl DecisionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProfileFast => "profile_fast",
+            Self::RuleFast => "rule_fast",
+            Self::Approx => "approx",
+            Self::ExactFlat => "exact_flat",
+            Self::ExactRisky => "exact_risky",
+        }
+    }
 }
 
 impl Index {
@@ -111,6 +161,11 @@ impl Index {
         {
             return Err("index offsets out of bounds".to_string());
         }
+        let (profile_counts, profile_label_masks) =
+            build_profile_stats(bytes, count, vectors_offset, labels_offset);
+        let risky_fallback_filter = RiskyFallbackFilter::from_env();
+        let risky_fallback_ids =
+            build_risky_fallback_ids(bytes, count, vectors_offset, &risky_fallback_filter);
 
         Ok(Self {
             mmap,
@@ -119,12 +174,19 @@ impl Index {
             labels_offset,
             bucket_offsets_offset,
             bucket_items_offset,
+            profile_counts,
+            profile_label_masks,
+            risky_fallback_ids,
         })
     }
 
     pub fn classify(&self, query: &QuantizedVector, params: &SearchParams) -> (bool, f32) {
         let (approved, score, _) = self.classify_detailed(query, params);
         (approved, score)
+    }
+
+    pub fn risky_fallback_count(&self) -> usize {
+        self.risky_fallback_ids.len()
     }
 
     pub fn prefault(&self) -> usize {
@@ -146,58 +208,127 @@ impl Index {
         &self,
         query: &QuantizedVector,
         params: &SearchParams,
-    ) -> (bool, f32, bool) {
+    ) -> (bool, f32, DecisionKind) {
+        if let Some(frauds) = self.try_profile_fast_decision(query, params) {
+            return decision_from_frauds(frauds, DecisionKind::ProfileFast);
+        }
+
         if params.fast_path || params.fast_only {
             if let Some(result) = fast_classify(query) {
-                return (result.0, result.1, true);
+                let frauds = if result.0 { 0 } else { K };
+                return decision_from_frauds(frauds, DecisionKind::RuleFast);
             }
         }
         if params.fast_only
             && !selective_search_fallback(query, params.search_fallback_last_distance)
         {
-            return (false, 1.0, false);
+            return decision_from_frauds(K, DecisionKind::RuleFast);
+        }
+
+        if params.flat || params.exact_fallback == EXACT_FALLBACK_PROFILE_MISS {
+            let frauds = self.classify_flat(query);
+            return decision_from_frauds(frauds, DecisionKind::ExactFlat);
         }
 
         let mut top_dist = [i64::MAX; K];
         let mut top_label = [0u8; K];
 
-        if params.flat {
-            for id in 0..self.count {
-                self.consider(id as u32, query, &mut top_dist, &mut top_label);
-            }
-        } else {
-            let mut keys = [0u16; BUCKET_COUNT];
-            let key_count = neighbor_keys(query, &mut keys);
-            let mut candidates = 0usize;
+        let mut keys = [0u16; BUCKET_COUNT];
+        let key_count = neighbor_keys(query, &mut keys);
+        let mut candidates = 0usize;
 
-            for key in keys.iter().take(key_count) {
-                let start = self.bucket_offset(*key as usize);
-                let end = self.bucket_offset(*key as usize + 1);
+        for key in keys.iter().take(key_count) {
+            let start = self.bucket_offset(*key as usize);
+            let end = self.bucket_offset(*key as usize + 1);
 
-                for item_pos in start..end {
-                    let id = self.bucket_item(item_pos);
-                    self.consider(id, query, &mut top_dist, &mut top_label);
-                    candidates += 1;
-                    if candidates >= params.max_candidates {
-                        break;
-                    }
-                }
-
-                if candidates >= params.max_candidates || candidates >= params.min_candidates {
+            for item_pos in start..end {
+                let id = self.bucket_item(item_pos);
+                self.consider(id, query, &mut top_dist, &mut top_label);
+                candidates += 1;
+                if candidates >= params.max_candidates {
                     break;
                 }
             }
 
-            if candidates < K {
-                for id in 0..self.count {
-                    self.consider(id as u32, query, &mut top_dist, &mut top_label);
-                }
+            if candidates >= params.max_candidates
+                || candidates >= params.min_candidates
+                || (candidates >= params.early_candidates
+                    && top_dist[K - 1] != i64::MAX
+                    && strong_decision(&top_label))
+            {
+                break;
             }
         }
 
-        let frauds = top_label.iter().filter(|&&label| label == 1).count();
-        let score = frauds as f32 / K as f32;
-        (score < 0.6, score, false)
+        if candidates < K {
+            let frauds = self.classify_flat(query);
+            return decision_from_frauds(frauds, DecisionKind::ExactFlat);
+        }
+
+        let frauds = count_frauds(&top_label);
+        if !should_use_exact_fallback(query, frauds, params) {
+            return decision_from_frauds(frauds, DecisionKind::Approx);
+        }
+
+        if params.exact_fallback == EXACT_FALLBACK_RISKY {
+            let frauds = self.classify_risky_flat(query, true);
+            decision_from_frauds(frauds, DecisionKind::ExactRisky)
+        } else {
+            let frauds = self.classify_flat(query);
+            decision_from_frauds(frauds, DecisionKind::ExactFlat)
+        }
+    }
+
+    fn classify_flat(&self, query: &QuantizedVector) -> usize {
+        let mut top_dist = [i64::MAX; K];
+        let mut top_label = [0u8; K];
+
+        for id in 0..self.count {
+            self.consider(id as u32, query, &mut top_dist, &mut top_label);
+        }
+
+        count_frauds(&top_label)
+    }
+
+    fn classify_risky_flat(&self, query: &QuantizedVector, allow_full_tiebreak: bool) -> usize {
+        if self.risky_fallback_ids.len() < K {
+            return self.classify_flat(query);
+        }
+
+        let mut top_dist = [i64::MAX; K];
+        let mut top_label = [0u8; K];
+
+        for &id in &self.risky_fallback_ids {
+            self.consider(id, query, &mut top_dist, &mut top_label);
+        }
+
+        let frauds = count_frauds(&top_label);
+        if allow_full_tiebreak && needs_full_risky_tiebreak(query, frauds) {
+            self.classify_flat(query)
+        } else {
+            frauds
+        }
+    }
+
+    fn try_profile_fast_decision(
+        &self,
+        query: &QuantizedVector,
+        params: &SearchParams,
+    ) -> Option<usize> {
+        if !params.profile_fast_path {
+            return None;
+        }
+
+        let key = profile_key(query);
+        if (self.profile_counts[key] as usize) < params.profile_min_count {
+            return None;
+        }
+
+        match self.profile_label_masks[key] {
+            LEGIT_MASK => Some(0),
+            FRAUD_MASK => Some(K),
+            _ => None,
+        }
     }
 
     fn consider(
@@ -207,34 +338,107 @@ impl Index {
         top_dist: &mut [i64; K],
         top_label: &mut [u8; K],
     ) {
-        let dist = self.distance_sq(id as usize, query);
+        let dist = self.distance_sq(id as usize, query, top_dist[K - 1]);
         if dist >= top_dist[K - 1] {
             return;
         }
 
-        for pos in 0..K {
-            if dist < top_dist[pos] {
-                for shift in (pos + 1..K).rev() {
-                    top_dist[shift] = top_dist[shift - 1];
-                    top_label[shift] = top_label[shift - 1];
-                }
-                top_dist[pos] = dist;
-                top_label[pos] = self.label(id as usize);
-                break;
-            }
+        let label = self.label(id as usize);
+        if dist < top_dist[0] {
+            top_dist[4] = top_dist[3];
+            top_dist[3] = top_dist[2];
+            top_dist[2] = top_dist[1];
+            top_dist[1] = top_dist[0];
+            top_dist[0] = dist;
+            top_label[4] = top_label[3];
+            top_label[3] = top_label[2];
+            top_label[2] = top_label[1];
+            top_label[1] = top_label[0];
+            top_label[0] = label;
+        } else if dist < top_dist[1] {
+            top_dist[4] = top_dist[3];
+            top_dist[3] = top_dist[2];
+            top_dist[2] = top_dist[1];
+            top_dist[1] = dist;
+            top_label[4] = top_label[3];
+            top_label[3] = top_label[2];
+            top_label[2] = top_label[1];
+            top_label[1] = label;
+        } else if dist < top_dist[2] {
+            top_dist[4] = top_dist[3];
+            top_dist[3] = top_dist[2];
+            top_dist[2] = dist;
+            top_label[4] = top_label[3];
+            top_label[3] = top_label[2];
+            top_label[2] = label;
+        } else if dist < top_dist[3] {
+            top_dist[4] = top_dist[3];
+            top_dist[3] = dist;
+            top_label[4] = top_label[3];
+            top_label[3] = label;
+        } else {
+            top_dist[4] = dist;
+            top_label[4] = label;
         }
     }
 
-    fn distance_sq(&self, id: usize, query: &QuantizedVector) -> i64 {
+    fn distance_sq(&self, id: usize, query: &QuantizedVector, cutoff: i64) -> i64 {
         let start = self.vectors_offset + id * DIM * 2;
         let bytes = self.mmap.as_slice();
         let mut sum = 0i64;
-        for (i, value) in query.iter().enumerate().take(DIM) {
-            let pos = start + i * 2;
-            let candidate = i16::from_le_bytes([bytes[pos], bytes[pos + 1]]) as i64;
-            let d = *value as i64 - candidate;
-            sum += d * d;
+        add_dim(bytes, start, query, 6, &mut sum);
+        if sum >= cutoff {
+            return sum;
         }
+        add_dim(bytes, start, query, 10, &mut sum);
+        if sum >= cutoff {
+            return sum;
+        }
+        add_dim(bytes, start, query, 9, &mut sum);
+        if sum >= cutoff {
+            return sum;
+        }
+        add_dim(bytes, start, query, 5, &mut sum);
+        if sum >= cutoff {
+            return sum;
+        }
+        add_dim(bytes, start, query, 11, &mut sum);
+        if sum >= cutoff {
+            return sum;
+        }
+        add_dim(bytes, start, query, 2, &mut sum);
+        if sum >= cutoff {
+            return sum;
+        }
+        add_dim(bytes, start, query, 4, &mut sum);
+        if sum >= cutoff {
+            return sum;
+        }
+        add_dim(bytes, start, query, 7, &mut sum);
+        if sum >= cutoff {
+            return sum;
+        }
+        add_dim(bytes, start, query, 0, &mut sum);
+        if sum >= cutoff {
+            return sum;
+        }
+        add_dim(bytes, start, query, 1, &mut sum);
+        if sum >= cutoff {
+            return sum;
+        }
+        add_dim(bytes, start, query, 8, &mut sum);
+        if sum >= cutoff {
+            return sum;
+        }
+        add_dim(bytes, start, query, 12, &mut sum);
+        if sum >= cutoff {
+            return sum;
+        }
+        add_dim(bytes, start, query, 3, &mut sum);
+        if sum >= cutoff {
+            return sum;
+        }
+        add_dim(bytes, start, query, 13, &mut sum);
         sum
     }
 
@@ -265,6 +469,295 @@ fn env_bool(name: &str, default: bool) -> bool {
         .ok()
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
         .unwrap_or(default)
+}
+
+fn exact_fallback_mode(value: Option<&str>) -> u8 {
+    match value {
+        Some("1" | "uncertain" | "UNCERTAIN") => EXACT_FALLBACK_UNCERTAIN,
+        Some("2" | "risky" | "RISKY") => EXACT_FALLBACK_RISKY,
+        Some("3" | "profile" | "PROFILE" | "profile_miss" | "PROFILE_MISS") => {
+            EXACT_FALLBACK_PROFILE_MISS
+        }
+        _ => EXACT_FALLBACK_OFF,
+    }
+}
+
+pub fn exact_fallback_name(mode: u8) -> &'static str {
+    match mode {
+        EXACT_FALLBACK_UNCERTAIN => "uncertain",
+        EXACT_FALLBACK_RISKY => "risky",
+        EXACT_FALLBACK_PROFILE_MISS => "profile_miss",
+        _ => "off",
+    }
+}
+
+fn decision_from_frauds(frauds: usize, kind: DecisionKind) -> (bool, f32, DecisionKind) {
+    let score = frauds as f32 / K as f32;
+    (frauds < 3, score, kind)
+}
+
+fn count_frauds(top_label: &[u8; K]) -> usize {
+    top_label.iter().filter(|&&label| label == 1).count()
+}
+
+fn strong_decision(top_label: &[u8; K]) -> bool {
+    let frauds = count_frauds(top_label);
+    frauds <= 1 || frauds >= 4
+}
+
+fn should_use_exact_fallback(
+    query: &QuantizedVector,
+    frauds: usize,
+    params: &SearchParams,
+) -> bool {
+    if frauds > 0 && frauds < K {
+        return matches!(
+            params.exact_fallback,
+            EXACT_FALLBACK_UNCERTAIN | EXACT_FALLBACK_RISKY
+        );
+    }
+
+    params.exact_fallback == EXACT_FALLBACK_RISKY && is_strong_fallback_risk(query, frauds)
+}
+
+fn is_strong_fallback_risk(query: &QuantizedVector, frauds: usize) -> bool {
+    if frauds != 0 && frauds != K {
+        return false;
+    }
+
+    if frauds == 0 && is_high_risk_online_fallback(query) {
+        return true;
+    }
+
+    if frauds == 0 && is_no_last_moderate_risk_fallback(query) {
+        return true;
+    }
+
+    query[5] >= 0
+        && query[10] == 0
+        && query[0] >= 450
+        && query[0] <= 1_100
+        && query[2] >= 900
+        && query[2] <= 2_500
+        && query[7] >= 500
+        && query[7] <= 2_000
+        && query[8] >= 2_000
+        && query[8] <= 4_500
+}
+
+fn is_no_last_moderate_risk_fallback(query: &QuantizedVector) -> bool {
+    query[5] < 0
+        && query[11] == 0
+        && query[0] >= 350
+        && query[0] <= 700
+        && query[1] >= 3_000
+        && query[1] <= 6_500
+        && query[2] >= 900
+        && query[2] <= 2_200
+        && query[7] >= 350
+        && query[7] <= 1_000
+        && query[8] >= 2_000
+        && query[8] <= 3_500
+        && query[12] <= 5_000
+        && query[13] <= 300
+}
+
+fn needs_full_risky_tiebreak(query: &QuantizedVector, frauds: usize) -> bool {
+    if query[5] < 0 || query[9] <= 0 || query[10] != 0 {
+        return false;
+    }
+
+    if frauds >= 3 {
+        return query[11] == 0
+            && query[12] <= 1_700
+            && query[0] >= 500
+            && query[0] <= 900
+            && query[2] >= 1_000
+            && query[2] <= 2_200
+            && query[7] >= 350
+            && query[7] <= 900
+            && query[8] >= 1_800
+            && query[8] <= 3_000;
+    }
+
+    is_high_risk_online_fallback(query)
+}
+
+fn is_high_risk_online_fallback(query: &QuantizedVector) -> bool {
+    query[12] >= 8_000
+        && query[1] >= 5_500
+        && query[6] >= 1_000
+        && query[6] <= 1_700
+        && query[7] >= 300
+        && query[7] <= 4_200
+        && query[8] >= 3_800
+        && query[8] <= 6_000
+        && ((query[0] >= 450 && query[0] <= 600 && query[2] <= 1_200)
+            || (query[0] >= 2_500 && query[0] <= 3_100 && query[2] >= 9_000))
+}
+
+fn add_dim(bytes: &[u8], vector_start: usize, query: &QuantizedVector, dim: usize, sum: &mut i64) {
+    let candidate = read_i16_unchecked(bytes, vector_start + dim * 2) as i64;
+    let d = query[dim] as i64 - candidate;
+    *sum += d * d;
+}
+
+fn read_i16_unchecked(bytes: &[u8], pos: usize) -> i16 {
+    i16::from_le_bytes([bytes[pos], bytes[pos + 1]])
+}
+
+fn build_profile_stats(
+    bytes: &[u8],
+    count: usize,
+    vectors_offset: usize,
+    labels_offset: usize,
+) -> (Vec<u16>, Vec<u8>) {
+    let mut profile_counts = vec![0u16; PROFILE_KEY_COUNT];
+    let mut profile_label_masks = vec![0u8; PROFILE_KEY_COUNT];
+
+    for id in 0..count {
+        let key = profile_key_at(bytes, vectors_offset + id * DIM * 2);
+        profile_counts[key] = profile_counts[key].saturating_add(1);
+        let label = bytes[labels_offset + id];
+        profile_label_masks[key] |= if label == 1 { FRAUD_MASK } else { LEGIT_MASK };
+    }
+
+    (profile_counts, profile_label_masks)
+}
+
+fn build_risky_fallback_ids(
+    bytes: &[u8],
+    count: usize,
+    vectors_offset: usize,
+    filter: &RiskyFallbackFilter,
+) -> Vec<u32> {
+    let mut ids = Vec::with_capacity(128_000);
+    for id in 0..count {
+        let start = vectors_offset + id * DIM * 2;
+        if is_risky_fallback_reference(bytes, start, filter) {
+            ids.push(id as u32);
+        }
+    }
+    ids
+}
+
+fn is_risky_fallback_reference(
+    bytes: &[u8],
+    vector_start: usize,
+    filter: &RiskyFallbackFilter,
+) -> bool {
+    let amount = read_i16_unchecked(bytes, vector_start) as i32;
+    if amount < filter.amount_min || amount > filter.amount_max {
+        return false;
+    }
+
+    let installments = read_i16_unchecked(bytes, vector_start + 2) as i32;
+    if installments < filter.installments_min || installments > filter.installments_max {
+        return false;
+    }
+
+    if (read_i16_unchecked(bytes, vector_start + 4) as i32) < filter.ratio_min {
+        return false;
+    }
+
+    let km_home = read_i16_unchecked(bytes, vector_start + 14) as i32;
+    if km_home < filter.km_home_min || km_home > filter.km_home_max {
+        return false;
+    }
+
+    let tx24h = read_i16_unchecked(bytes, vector_start + 16) as i32;
+    if tx24h < filter.tx24h_min || tx24h > filter.tx24h_max {
+        return false;
+    }
+
+    let merchant_average = read_i16_unchecked(bytes, vector_start + 26) as i32;
+    merchant_average >= filter.merchant_avg_min && merchant_average <= filter.merchant_avg_max
+}
+
+fn profile_key(vector: &QuantizedVector) -> usize {
+    let mut key = 0usize;
+    key |= bucket16(vector[2]) as usize;
+    key |= (bucket8(vector[7]) as usize) << 4;
+    key |= (bucket4(vector[8]) as usize) << 7;
+    key |= (bucket4(vector[12]) as usize) << 9;
+    key |= (bucket4(vector[0]) as usize) << 11;
+    key |= (if vector[5] < 0 { 1 } else { 0 }) << 13;
+    key |= (if vector[9] > 0 { 1 } else { 0 }) << 14;
+    key |= (if vector[10] > 0 { 1 } else { 0 }) << 15;
+    key |= (if vector[11] > 0 { 1 } else { 0 }) << 16;
+    key |= (bucket4(vector[6]) as usize) << 17;
+    key |= (if vector[1] > 1_000 { 1 } else { 0 }) << 19;
+    key |= (bucket4(vector[13]) as usize) << 20;
+    key
+}
+
+fn profile_key_at(bytes: &[u8], vector_start: usize) -> usize {
+    let mut key = 0usize;
+    key |= bucket16(read_i16_unchecked(bytes, vector_start + 4)) as usize;
+    key |= (bucket8(read_i16_unchecked(bytes, vector_start + 14)) as usize) << 4;
+    key |= (bucket4(read_i16_unchecked(bytes, vector_start + 16)) as usize) << 7;
+    key |= (bucket4(read_i16_unchecked(bytes, vector_start + 24)) as usize) << 9;
+    key |= (bucket4(read_i16_unchecked(bytes, vector_start)) as usize) << 11;
+    key |= (if read_i16_unchecked(bytes, vector_start + 10) < 0 {
+        1
+    } else {
+        0
+    }) << 13;
+    key |= (if read_i16_unchecked(bytes, vector_start + 18) > 0 {
+        1
+    } else {
+        0
+    }) << 14;
+    key |= (if read_i16_unchecked(bytes, vector_start + 20) > 0 {
+        1
+    } else {
+        0
+    }) << 15;
+    key |= (if read_i16_unchecked(bytes, vector_start + 22) > 0 {
+        1
+    } else {
+        0
+    }) << 16;
+    key |= (bucket4(read_i16_unchecked(bytes, vector_start + 12)) as usize) << 17;
+    key |= (if read_i16_unchecked(bytes, vector_start + 2) > 1_000 {
+        1
+    } else {
+        0
+    }) << 19;
+    key |= (bucket4(read_i16_unchecked(bytes, vector_start + 26)) as usize) << 20;
+    key
+}
+
+struct RiskyFallbackFilter {
+    amount_min: i32,
+    amount_max: i32,
+    installments_min: i32,
+    installments_max: i32,
+    ratio_min: i32,
+    km_home_min: i32,
+    km_home_max: i32,
+    tx24h_min: i32,
+    tx24h_max: i32,
+    merchant_avg_min: i32,
+    merchant_avg_max: i32,
+}
+
+impl RiskyFallbackFilter {
+    fn from_env() -> Self {
+        Self {
+            amount_min: env_usize("RISKY_AMOUNT_MIN", 350) as i32,
+            amount_max: env_usize("RISKY_AMOUNT_MAX", 3_200) as i32,
+            installments_min: env_usize("RISKY_INSTALLMENTS_MIN", 2_000) as i32,
+            installments_max: env_usize("RISKY_INSTALLMENTS_MAX", 6_500) as i32,
+            ratio_min: env_usize("RISKY_RATIO_MIN", 750) as i32,
+            km_home_min: env_usize("RISKY_KM_HOME_MIN", 200) as i32,
+            km_home_max: env_usize("RISKY_KM_HOME_MAX", 4_300) as i32,
+            tx24h_min: env_usize("RISKY_TX24H_MIN", 1_500) as i32,
+            tx24h_max: env_usize("RISKY_TX24H_MAX", 6_000) as i32,
+            merchant_avg_min: env_usize("RISKY_MERCHANT_AVG_MIN", 0) as i32,
+            merchant_avg_max: env_usize("RISKY_MERCHANT_AVG_MAX", 450) as i32,
+        }
+    }
 }
 
 fn fast_classify(v: &QuantizedVector) -> Option<(bool, f32)> {
@@ -484,11 +977,15 @@ mod tests {
     #[test]
     fn overload_switches_to_fast_only() {
         let params = SearchParams {
+            early_candidates: 10_000,
             min_candidates: 10_000,
             max_candidates: 40_000,
             flat: false,
             fast_path: true,
             fast_only: false,
+            profile_fast_path: true,
+            profile_min_count: 20,
+            exact_fallback: 0,
             overload_min_candidates: 3_000,
             overload_max_candidates: 15_000,
             overload_threshold: 8,
@@ -499,6 +996,7 @@ mod tests {
         assert!(!params.for_load(7).fast_only);
         let overloaded = params.for_load(8);
         assert!(overloaded.fast_only);
+        assert_eq!(overloaded.early_candidates, 3_000);
         assert_eq!(overloaded.min_candidates, 3_000);
         assert_eq!(overloaded.max_candidates, 15_000);
     }

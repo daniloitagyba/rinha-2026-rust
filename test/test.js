@@ -12,6 +12,8 @@ const statsArr = new SharedArray('test-stats', function () {
     return [JSON.parse(open('./test-data.json')).stats];
 });
 const expectedStats = statsArr[0];
+const baseUrl = __ENV.BASE_URL || 'http://localhost:9999';
+const resultsPath = __ENV.RESULTS_PATH || 'test/results.json';
 
 const tpCount = new Counter('tp_count');
 const tnCount = new Counter('tn_count');
@@ -29,13 +31,13 @@ export const options = {
     scenarios: {
         default: {
             executor: 'ramping-arrival-rate',
-            startRate: 1,
+            startRate: Number(__ENV.START_RATE || '1'),
             timeUnit: '1s',
-            preAllocatedVUs: 100,
-            maxVUs: 250,
+            preAllocatedVUs: Number(__ENV.PRE_ALLOCATED_VUS || '100'),
+            maxVUs: Number(__ENV.MAX_VUS || '250'),
             gracefulStop: '10s',
             stages: [
-                { duration: '120s', target: 900 },
+                { duration: __ENV.RAMP_DURATION || '120s', target: Number(__ENV.TARGET_RATE || '900') },
             ],
         },
     },
@@ -57,9 +59,9 @@ export default function () {
     const expectedApproved = entry.expected_approved;
 
     const res = http.post(
-        'http://localhost:9999/fraud-score',
+        `${baseUrl}/fraud-score`,
         JSON.stringify(entry.request),
-        { headers: { 'Content-Type': 'application/json' }, timeout: '2001ms' }
+        { headers: { 'Content-Type': 'application/json' }, timeout: __ENV.REQUEST_TIMEOUT || '2001ms' }
     );
 
     if (res.status === 200) {
@@ -165,7 +167,7 @@ export function handleSummary(data) {
     };
 
     return {
-        'test/results.json': JSON.stringify(result, null, 2),
+        [resultsPath]: JSON.stringify(result, null, 2),
         //stdout: textSummary(data, { indent: ' ', enableColors: true }),
     };
 }

@@ -159,7 +159,15 @@ fn q(v: f64) -> i16 {
     (v * SCALE as f64).round() as i16
 }
 
-fn bucket8(v: i16) -> i32 {
+pub fn bucket16(v: i16) -> i32 {
+    if v <= 0 {
+        0
+    } else {
+        ((v as i32 * 16) / (SCALE + 1)).clamp(0, 15)
+    }
+}
+
+pub fn bucket8(v: i16) -> i32 {
     if v <= 0 {
         0
     } else {
@@ -167,7 +175,7 @@ fn bucket8(v: i16) -> i32 {
     }
 }
 
-fn bucket4(v: i16) -> i32 {
+pub fn bucket4(v: i16) -> i32 {
     if v <= 0 {
         0
     } else {
