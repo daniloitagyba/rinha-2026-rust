@@ -67,13 +67,13 @@ pub fn run(input: &str) -> Result<(), String> {
                 if let Some(writer) = dump_writer.as_mut() {
                     write_eval_row(
                         writer,
-                        expected,
-                        approved,
-                        fraud_count,
-                        kind,
-                        Some(&query),
-                        None,
-                    )?;
+                            expected,
+                            approved,
+                            fraud_count,
+                            kind,
+                            Some(&query),
+                            None,
+                        )?;
                 }
 
                 if approved != expected {

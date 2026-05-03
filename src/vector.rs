@@ -7,51 +7,88 @@ pub const BUCKET_COUNT: usize = 65_536;
 
 pub type QuantizedVector = [i16; DIM];
 
+pub struct VectorInput<'a> {
+    pub amount: f64,
+    pub installments: f64,
+    pub requested_at: &'a [u8],
+    pub customer_avg_amount: f64,
+    pub tx_count_24h: f64,
+    pub known_merchant: bool,
+    pub mcc: &'a [u8],
+    pub merchant_avg_amount: f64,
+    pub is_online: bool,
+    pub card_present: bool,
+    pub km_from_home: f64,
+    pub has_last_transaction: bool,
+    pub last_timestamp: &'a [u8],
+    pub last_km_from_current: f64,
+}
+
 pub fn vectorize(payload: &Payload<'_>) -> QuantizedVector {
+    vectorize_input(VectorInput {
+        amount: payload.amount,
+        installments: payload.installments,
+        requested_at: payload.requested_at.as_bytes(),
+        customer_avg_amount: payload.customer_avg_amount,
+        tx_count_24h: payload.tx_count_24h,
+        known_merchant: contains_quoted_bytes(
+            payload.known_merchants.as_bytes(),
+            payload.merchant_id.as_bytes(),
+        ),
+        mcc: payload.mcc.as_bytes(),
+        merchant_avg_amount: payload.merchant_avg_amount,
+        is_online: payload.is_online,
+        card_present: payload.card_present,
+        km_from_home: payload.km_from_home,
+        has_last_transaction: payload.last_timestamp.is_some(),
+        last_timestamp: payload.last_timestamp.map(str::as_bytes).unwrap_or(&[]),
+        last_km_from_current: payload.last_km_from_current.unwrap_or(0.0),
+    })
+}
+
+pub fn vectorize_input(input: VectorInput<'_>) -> QuantizedVector {
     let (year, month, day, hour, minute) =
-        parse_time(payload.requested_at).unwrap_or((2026, 1, 1, 0, 0));
+        parse_time_bytes(input.requested_at).unwrap_or((2026, 1, 1, 0, 0));
     let dow = day_of_week(year, month, day);
 
     let mut out = [0i16; DIM];
-    out[0] = q(clamp01(payload.amount / 10_000.0));
-    out[1] = q(clamp01(payload.installments / 12.0));
+    out[0] = q(clamp01(input.amount / 10_000.0));
+    out[1] = q(clamp01(input.installments / 12.0));
     out[2] = q(clamp01(amount_vs_avg(
-        payload.amount,
-        payload.customer_avg_amount,
+        input.amount,
+        input.customer_avg_amount,
     )));
     out[3] = q((hour as f64) / 23.0);
     out[4] = q((dow as f64) / 6.0);
 
-    if let Some(last_ts) = payload.last_timestamp {
+    if input.has_last_transaction {
         let current = epoch_minutes(year, month, day, hour, minute);
-        let last = parse_time(last_ts)
+        let last = parse_time_bytes(input.last_timestamp)
             .map(|(y, m, d, h, min)| epoch_minutes(y, m, d, h, min))
             .unwrap_or(current);
         let minutes = (current - last).max(0) as f64;
         out[5] = q(clamp01(minutes / 1440.0));
-        out[6] = q(clamp01(
-            payload.last_km_from_current.unwrap_or(0.0) / 1000.0,
-        ));
+        out[6] = q(clamp01(input.last_km_from_current / 1000.0));
     } else {
         out[5] = -SCALE as i16;
         out[6] = -SCALE as i16;
     }
 
-    out[7] = q(clamp01(payload.km_from_home / 1000.0));
-    out[8] = q(clamp01(payload.tx_count_24h / 20.0));
-    out[9] = if payload.is_online { SCALE as i16 } else { 0 };
-    out[10] = if payload.card_present {
+    out[7] = q(clamp01(input.km_from_home / 1000.0));
+    out[8] = q(clamp01(input.tx_count_24h / 20.0));
+    out[9] = if input.is_online { SCALE as i16 } else { 0 };
+    out[10] = if input.card_present {
         SCALE as i16
     } else {
         0
     };
-    out[11] = if contains_quoted(payload.known_merchants, payload.merchant_id) {
+    out[11] = if input.known_merchant {
         0
     } else {
         SCALE as i16
     };
-    out[12] = q(mcc_risk(payload.mcc));
-    out[13] = q(clamp01(payload.merchant_avg_amount / 10_000.0));
+    out[12] = q(mcc_risk_bytes(input.mcc));
+    out[13] = q(clamp01(input.merchant_avg_amount / 10_000.0));
     out
 }
 
@@ -183,33 +220,39 @@ pub fn bucket4(v: i16) -> i32 {
     }
 }
 
-fn mcc_risk(mcc: &str) -> f64 {
-    match mcc {
-        "5411" => 0.15,
-        "5812" => 0.30,
-        "5912" => 0.20,
-        "5944" => 0.45,
-        "7801" => 0.80,
-        "7802" => 0.75,
-        "7995" => 0.85,
-        "4511" => 0.35,
-        "5311" => 0.25,
-        "5999" => 0.50,
-        _ => 0.50,
+fn mcc_risk_bytes(mcc: &[u8]) -> f64 {
+    if mcc == b"5411" {
+        0.15
+    } else if mcc == b"5812" {
+        0.30
+    } else if mcc == b"5912" {
+        0.20
+    } else if mcc == b"5944" {
+        0.45
+    } else if mcc == b"7801" {
+        0.80
+    } else if mcc == b"7802" {
+        0.75
+    } else if mcc == b"7995" {
+        0.85
+    } else if mcc == b"4511" {
+        0.35
+    } else if mcc == b"5311" {
+        0.25
+    } else {
+        0.50
     }
 }
 
-fn contains_quoted(haystack: &str, needle: &str) -> bool {
-    let bytes = haystack.as_bytes();
-    let needle = needle.as_bytes();
-    if needle.is_empty() || bytes.len() < needle.len() + 2 {
+fn contains_quoted_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() + 2 {
         return false;
     }
     let mut pos = 0usize;
-    while pos + needle.len() + 2 <= bytes.len() {
-        if bytes[pos] == b'"'
-            && &bytes[pos + 1..pos + 1 + needle.len()] == needle
-            && bytes[pos + 1 + needle.len()] == b'"'
+    while pos + needle.len() + 2 <= haystack.len() {
+        if haystack[pos] == b'"'
+            && &haystack[pos + 1..pos + 1 + needle.len()] == needle
+            && haystack[pos + 1 + needle.len()] == b'"'
         {
             return true;
         }
@@ -218,8 +261,7 @@ fn contains_quoted(haystack: &str, needle: &str) -> bool {
     false
 }
 
-fn parse_time(ts: &str) -> Option<(i32, u32, u32, u32, u32)> {
-    let b = ts.as_bytes();
+fn parse_time_bytes(b: &[u8]) -> Option<(i32, u32, u32, u32, u32)> {
     if b.len() < 16 {
         return None;
     }
