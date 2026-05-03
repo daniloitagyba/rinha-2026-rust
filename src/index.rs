@@ -9,6 +9,7 @@ use std::path::Path;
 const MAGIC: &[u8; 8] = b"RINHA26I";
 const HEADER_LEN: usize = 80;
 const PROFILE_KEY_COUNT: usize = 1 << 22;
+const RISKY_GROUP_COUNT: usize = 1 << 4;
 const LEGIT_MASK: u8 = 1;
 const FRAUD_MASK: u8 = 2;
 
@@ -99,6 +100,7 @@ pub struct Index {
     profile_counts: Vec<u16>,
     profile_label_masks: Vec<u8>,
     risky_fallback_ids: Vec<u32>,
+    risky_fallback_groups: Vec<Vec<u32>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -164,8 +166,8 @@ impl Index {
         let (profile_counts, profile_label_masks) =
             build_profile_stats(bytes, count, vectors_offset, labels_offset);
         let risky_fallback_filter = RiskyFallbackFilter::from_env();
-        let risky_fallback_ids =
-            build_risky_fallback_ids(bytes, count, vectors_offset, &risky_fallback_filter);
+        let (risky_fallback_ids, risky_fallback_groups) =
+            build_risky_fallback_index(bytes, count, vectors_offset, &risky_fallback_filter);
 
         Ok(Self {
             mmap,
@@ -177,6 +179,7 @@ impl Index {
             profile_counts,
             profile_label_masks,
             risky_fallback_ids,
+            risky_fallback_groups,
         })
     }
 
@@ -280,6 +283,10 @@ impl Index {
     }
 
     fn classify_flat(&self, query: &QuantizedVector) -> usize {
+        self.classify_all_ids(query)
+    }
+
+    fn classify_all_ids(&self, query: &QuantizedVector) -> usize {
         let mut top_dist = [i64::MAX; K];
         let mut top_label = [0u8; K];
 
@@ -290,19 +297,30 @@ impl Index {
         count_frauds(&top_label)
     }
 
+    fn classify_ids(&self, query: &QuantizedVector, ids: &[u32]) -> usize {
+        let mut top_dist = [i64::MAX; K];
+        let mut top_label = [0u8; K];
+
+        for &id in ids {
+            self.consider(id, query, &mut top_dist, &mut top_label);
+        }
+
+        count_frauds(&top_label)
+    }
+
     fn classify_risky_flat(&self, query: &QuantizedVector, allow_full_tiebreak: bool) -> usize {
         if self.risky_fallback_ids.len() < K {
             return self.classify_flat(query);
         }
 
-        let mut top_dist = [i64::MAX; K];
-        let mut top_label = [0u8; K];
-
-        for &id in &self.risky_fallback_ids {
-            self.consider(id, query, &mut top_dist, &mut top_label);
-        }
-
-        let frauds = count_frauds(&top_label);
+        let group_key = risky_group_key(query);
+        let candidates = self
+            .risky_fallback_groups
+            .get(group_key)
+            .filter(|ids| ids.len() >= K)
+            .map(Vec::as_slice)
+            .unwrap_or(&self.risky_fallback_ids);
+        let frauds = self.classify_ids(query, candidates);
         if allow_full_tiebreak && needs_full_risky_tiebreak(query, frauds) {
             self.classify_flat(query)
         } else {
@@ -625,20 +643,26 @@ fn build_profile_stats(
     (profile_counts, profile_label_masks)
 }
 
-fn build_risky_fallback_ids(
+fn build_risky_fallback_index(
     bytes: &[u8],
     count: usize,
     vectors_offset: usize,
     filter: &RiskyFallbackFilter,
-) -> Vec<u32> {
+) -> (Vec<u32>, Vec<Vec<u32>>) {
     let mut ids = Vec::with_capacity(128_000);
+    let mut groups = Vec::with_capacity(RISKY_GROUP_COUNT);
+    for _ in 0..RISKY_GROUP_COUNT {
+        groups.push(Vec::new());
+    }
     for id in 0..count {
         let start = vectors_offset + id * DIM * 2;
         if is_risky_fallback_reference(bytes, start, filter) {
-            ids.push(id as u32);
+            let item = id as u32;
+            ids.push(item);
+            groups[risky_group_key_at(bytes, start)].push(item);
         }
     }
-    ids
+    (ids, groups)
 }
 
 fn is_risky_fallback_reference(
@@ -725,6 +749,40 @@ fn profile_key_at(bytes: &[u8], vector_start: usize) -> usize {
         0
     }) << 19;
     key |= (bucket4(read_i16_unchecked(bytes, vector_start + 26)) as usize) << 20;
+    key
+}
+
+fn risky_group_key(query: &QuantizedVector) -> usize {
+    let mut key = 0usize;
+    key |= if query[5] < 0 { 1 } else { 0 };
+    key |= (if query[9] > 0 { 1 } else { 0 }) << 1;
+    key |= (if query[10] > 0 { 1 } else { 0 }) << 2;
+    key |= (if query[11] > 0 { 1 } else { 0 }) << 3;
+    key
+}
+
+fn risky_group_key_at(bytes: &[u8], vector_start: usize) -> usize {
+    let mut key = 0usize;
+    key |= if read_i16_unchecked(bytes, vector_start + 10) < 0 {
+        1
+    } else {
+        0
+    };
+    key |= (if read_i16_unchecked(bytes, vector_start + 18) > 0 {
+        1
+    } else {
+        0
+    }) << 1;
+    key |= (if read_i16_unchecked(bytes, vector_start + 20) > 0 {
+        1
+    } else {
+        0
+    }) << 2;
+    key |= (if read_i16_unchecked(bytes, vector_start + 22) > 0 {
+        1
+    } else {
+        0
+    }) << 3;
     key
 }
 
