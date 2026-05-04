@@ -17,7 +17,7 @@ services:
           memory: "32MB"
 
   api1:
-    image: ghcr.io/daniloitagyba/rinha-2026-rust:ed5a90cc2f78ffc1e03b23b3d5fb3fc26e49c012
+    image: ghcr.io/daniloitagyba/rinha-2026-rust:9c10dd4cae25956e3064fc7b1bbb51e59be1434f
     platform: linux/amd64
     environment:
       BIND_ADDR: unix:/sockets/api1.sock
@@ -41,7 +41,7 @@ services:
           memory: "156MB"
 
   api2:
-    image: ghcr.io/daniloitagyba/rinha-2026-rust:ed5a90cc2f78ffc1e03b23b3d5fb3fc26e49c012
+    image: ghcr.io/daniloitagyba/rinha-2026-rust:9c10dd4cae25956e3064fc7b1bbb51e59be1434f
     platform: linux/amd64
     environment:
       BIND_ADDR: unix:/sockets/api2.sock
