@@ -15,4 +15,4 @@ bytes = "1.10"
 http-body-util = "0.1.2"
 hyper = { version = "1.6", features = ["server", "http1"] }
 hyper-util = { version = "0.1.10", features = ["tokio"] }
-tokio = { version = "1.43", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.43", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

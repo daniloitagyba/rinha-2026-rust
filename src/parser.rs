@@ -129,15 +129,84 @@ fn array_slice<'a>(s: &'a str, key: &str) -> Option<&'a str> {
 fn number_field(s: &str, key: &str) -> Option<f64> {
     let mut pos = skip_ws(s, after_colon(s, key)?);
     let start = pos;
+    let bytes = s.as_bytes();
     while pos < s.len() {
-        let b = s.as_bytes()[pos];
+        let b = bytes[pos];
         if b.is_ascii_digit() || matches!(b, b'-' | b'+' | b'.' | b'e' | b'E') {
             pos += 1;
         } else {
             break;
         }
     }
-    s[start..pos].parse::<f64>().ok()
+    parse_number(&bytes[start..pos])
+}
+
+fn parse_number(bytes: &[u8]) -> Option<f64> {
+    if bytes.is_empty() {
+        return None;
+    }
+
+    let mut pos = 0usize;
+    let mut negative = false;
+    if bytes[pos] == b'-' {
+        negative = true;
+        pos += 1;
+    } else if bytes[pos] == b'+' {
+        pos += 1;
+    }
+
+    let mut value = 0.0f64;
+    let mut has_digit = false;
+    while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+        value = value * 10.0 + f64::from(bytes[pos] - b'0');
+        pos += 1;
+        has_digit = true;
+    }
+
+    if pos < bytes.len() && bytes[pos] == b'.' {
+        pos += 1;
+        let mut scale = 0.1f64;
+        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+            value += f64::from(bytes[pos] - b'0') * scale;
+            scale *= 0.1;
+            pos += 1;
+            has_digit = true;
+        }
+    }
+
+    if !has_digit {
+        return None;
+    }
+
+    if pos < bytes.len() && matches!(bytes[pos], b'e' | b'E') {
+        pos += 1;
+        let mut exp_negative = false;
+        if pos < bytes.len() && bytes[pos] == b'-' {
+            exp_negative = true;
+            pos += 1;
+        } else if pos < bytes.len() && bytes[pos] == b'+' {
+            pos += 1;
+        }
+
+        let mut exp = 0i32;
+        let mut has_exp_digit = false;
+        while pos < bytes.len() && bytes[pos].is_ascii_digit() {
+            exp = exp
+                .saturating_mul(10)
+                .saturating_add(i32::from(bytes[pos] - b'0'));
+            pos += 1;
+            has_exp_digit = true;
+        }
+        if !has_exp_digit {
+            return None;
+        }
+        value *= 10f64.powi(if exp_negative { -exp } else { exp });
+    }
+
+    if pos != bytes.len() {
+        return None;
+    }
+    Some(if negative { -value } else { value })
 }
 
 fn string_field<'a>(s: &'a str, key: &str) -> Option<&'a str> {
