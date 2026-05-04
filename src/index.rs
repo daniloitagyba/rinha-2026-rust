@@ -349,6 +349,7 @@ impl Index {
         }
     }
 
+    #[inline(always)]
     fn consider(
         &self,
         id: u32,
@@ -400,6 +401,7 @@ impl Index {
         }
     }
 
+    #[inline(always)]
     fn distance_sq(&self, id: usize, query: &QuantizedVector, cutoff: i64) -> i64 {
         let start = self.vectors_offset + id * DIM * 2;
         let bytes = self.mmap.as_slice();
@@ -460,15 +462,18 @@ impl Index {
         sum
     }
 
+    #[inline(always)]
     fn label(&self, id: usize) -> u8 {
         self.mmap.as_slice()[self.labels_offset + id]
     }
 
+    #[inline(always)]
     fn bucket_offset(&self, key: usize) -> usize {
         let pos = self.bucket_offsets_offset + key * 4;
         read_u32_unchecked(self.mmap.as_slice(), pos) as usize
     }
 
+    #[inline(always)]
     fn bucket_item(&self, pos: usize) -> u32 {
         let byte_pos = self.bucket_items_offset + pos * 4;
         read_u32_unchecked(self.mmap.as_slice(), byte_pos)
@@ -614,14 +619,17 @@ fn is_high_risk_online_fallback(query: &QuantizedVector) -> bool {
             || (query[0] >= 2_500 && query[0] <= 3_100 && query[2] >= 9_000))
 }
 
+#[inline(always)]
 fn add_dim(bytes: &[u8], vector_start: usize, query: &QuantizedVector, dim: usize, sum: &mut i64) {
     let candidate = read_i16_unchecked(bytes, vector_start + dim * 2) as i64;
     let d = query[dim] as i64 - candidate;
     *sum += d * d;
 }
 
+#[inline(always)]
 fn read_i16_unchecked(bytes: &[u8], pos: usize) -> i16 {
-    i16::from_le_bytes([bytes[pos], bytes[pos + 1]])
+    debug_assert!(pos + 2 <= bytes.len());
+    unsafe { i16::from_le(std::ptr::read_unaligned(bytes.as_ptr().add(pos) as *const i16)) }
 }
 
 fn build_profile_stats(
@@ -900,8 +908,10 @@ fn read_u64(bytes: &[u8], pos: usize) -> Result<u64, String> {
     ]))
 }
 
+#[inline(always)]
 fn read_u32_unchecked(bytes: &[u8], pos: usize) -> u32 {
-    u32::from_le_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]])
+    debug_assert!(pos + 4 <= bytes.len());
+    unsafe { u32::from_le(std::ptr::read_unaligned(bytes.as_ptr().add(pos) as *const u32)) }
 }
 
 pub struct Mmap {
