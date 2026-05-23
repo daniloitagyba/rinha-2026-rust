@@ -17,7 +17,7 @@ services:
           memory: "32MB"
 
   api1:
-    image: ghcr.io/daniloitagyba/rinha-2026-rust:85eec524a1d17f62ad7dda641353973319f62073
+    image: ghcr.io/daniloitagyba/rinha-2026-rust:ca8bcdbea05b4c55a22739447e4f9ee68df0e8f8
     platform: linux/amd64
     environment:
       BIND_ADDR: unix:/sockets/api1.sock
@@ -25,12 +25,17 @@ services:
       PREFETCH_INDEX: "true"
       WORKERS: "2"
       KEEP_ALIVE_REQUESTS: "256"
-      EARLY_CANDIDATES: "16200"
-      MIN_CANDIDATES: "16200"
-      MAX_CANDIDATES: "32400"
+      EARLY_CANDIDATES: "4000"
+      MIN_CANDIDATES: "4000"
+      MAX_CANDIDATES: "8000"
       PROFILE_FASTPATH: "1"
-      PROFILE_MIN_COUNT: "20"
+      PROFILE_MIN_COUNT: "15"
       EXACT_FALLBACK: "risky"
+      OVERLOAD_MIN_CANDIDATES: "3000"
+      OVERLOAD_MAX_CANDIDATES: "8000"
+      OVERLOAD_THRESHOLD: "0"
+      OVERLOAD_FAST_ONLY: "true"
+      SEARCH_FALLBACK_LAST_DISTANCE: "2900"
       FAST_PATH: "false"
     volumes:
       - backend-sockets:/sockets
@@ -41,7 +46,7 @@ services:
           memory: "156MB"
 
   api2:
-    image: ghcr.io/daniloitagyba/rinha-2026-rust:85eec524a1d17f62ad7dda641353973319f62073
+    image: ghcr.io/daniloitagyba/rinha-2026-rust:ca8bcdbea05b4c55a22739447e4f9ee68df0e8f8
     platform: linux/amd64
     environment:
       BIND_ADDR: unix:/sockets/api2.sock
@@ -49,12 +54,17 @@ services:
       PREFETCH_INDEX: "true"
       WORKERS: "2"
       KEEP_ALIVE_REQUESTS: "256"
-      EARLY_CANDIDATES: "16200"
-      MIN_CANDIDATES: "16200"
-      MAX_CANDIDATES: "32400"
+      EARLY_CANDIDATES: "4000"
+      MIN_CANDIDATES: "4000"
+      MAX_CANDIDATES: "8000"
       PROFILE_FASTPATH: "1"
-      PROFILE_MIN_COUNT: "20"
+      PROFILE_MIN_COUNT: "15"
       EXACT_FALLBACK: "risky"
+      OVERLOAD_MIN_CANDIDATES: "3000"
+      OVERLOAD_MAX_CANDIDATES: "8000"
+      OVERLOAD_THRESHOLD: "0"
+      OVERLOAD_FAST_ONLY: "true"
+      SEARCH_FALLBACK_LAST_DISTANCE: "2900"
       FAST_PATH: "false"
     volumes:
       - backend-sockets:/sockets
