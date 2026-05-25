@@ -109,6 +109,6 @@ O compose da branch `submission` usa somente imagens publicas e define
 `platform: linux/amd64` para todos os servicos.
 
 O perfil padrao usa `PROFILE_FASTPATH=1`, `PROFILE_MIN_COUNT=20`,
-`EXACT_FALLBACK=risky` e `EARLY_CANDIDATES/MIN_CANDIDATES/MAX_CANDIDATES=8000/8000/16000`.
+`EXACT_FALLBACK=risky` e `EARLY_CANDIDATES/MIN_CANDIDATES/MAX_CANDIDATES=16200/16200/16200`.
 `FAST_PATH=false` deixa as heuristicas manuais desligadas por padrao; o overload
 fica desabilitado por padrao com `OVERLOAD_THRESHOLD=0`.
