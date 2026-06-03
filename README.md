@@ -154,4 +154,5 @@ O perfil padrao usa `FD_EPOLL_RAW=1`, `PROFILE_FASTPATH=1`,
 `EARLY_CANDIDATES/MIN_CANDIDATES/MAX_CANDIDATES=4500/4500/5500`.
 `FAST_PATH=false` deixa as heuristicas manuais desligadas por padrao; o overload
 fica desabilitado por padrao com `OVERLOAD_THRESHOLD=0`. O compose padrao
-distribui CPU como `LB/API/API = 0.16/0.42/0.42`.
+distribui CPU como `LB/API/API = 0.16/0.42/0.42` e habilita
+`TCP_DEFER_ACCEPT=1` no LB fdpass.

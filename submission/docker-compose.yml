@@ -9,6 +9,7 @@ services:
       LB_PRECONNECT_CONTROL: "1"
       LB_ACCEPT_BATCH: "128"
       LB_BACKLOG: "65535"
+      TCP_DEFER_ACCEPT: "1"
       UPSTREAMS: /sockets/api1.sock.ctrl,/sockets/api2.sock.ctrl
     ports:
       - "9999:9999"

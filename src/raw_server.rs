@@ -6,7 +6,6 @@ use crate::http::{
     RX_CAP,
 };
 use crate::index::{Index, SearchParams};
-use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io;
@@ -18,6 +17,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 const MAX_EVENTS: usize = 1024;
+const MAX_FD_SLOTS: usize = 65_536;
 
 struct Conn {
     buf: Vec<u8>,
@@ -30,21 +30,87 @@ struct Conn {
 }
 
 impl Conn {
-    fn new(initial: Vec<u8>) -> Self {
-        let mut buf = vec![0u8; RX_CAP];
-        let tail = initial.len().min(RX_CAP);
-        if tail > 0 {
-            buf[..tail].copy_from_slice(&initial[..tail]);
-        }
-
-        Self {
-            buf,
+    fn new_box() -> Box<Self> {
+        Box::new(Self {
+            buf: vec![0u8; RX_CAP],
             head: 0,
-            tail,
+            tail: 0,
             pending: Vec::with_capacity(8192),
             pending_off: 0,
             handled: 0,
             close_after_write: false,
+        })
+    }
+
+    fn reset(&mut self, initial: Vec<u8>) {
+        let tail = initial.len().min(RX_CAP);
+        if tail > 0 {
+            self.buf[..tail].copy_from_slice(&initial[..tail]);
+        }
+
+        self.head = 0;
+        self.tail = tail;
+        self.pending.clear();
+        self.pending_off = 0;
+        self.handled = 0;
+        self.close_after_write = false;
+    }
+}
+
+struct ConnTable {
+    slots: Vec<Option<Box<Conn>>>,
+    pool: Vec<Box<Conn>>,
+    pool_cap: usize,
+}
+
+impl ConnTable {
+    fn new(pool_cap: usize) -> Self {
+        let mut pool = Vec::with_capacity(pool_cap);
+        for _ in 0..pool_cap.min(128) {
+            pool.push(Conn::new_box());
+        }
+
+        let mut slots = Vec::with_capacity(MAX_FD_SLOTS);
+        slots.resize_with(MAX_FD_SLOTS, || None);
+
+        Self {
+            slots,
+            pool,
+            pool_cap,
+        }
+    }
+
+    fn insert(&mut self, fd: RawFd, initial: Vec<u8>) -> bool {
+        let idx = fd as usize;
+        if idx >= self.slots.len() || self.slots[idx].is_some() {
+            return false;
+        }
+
+        let mut conn = self.pool.pop().unwrap_or_else(Conn::new_box);
+        conn.reset(initial);
+        self.slots[idx] = Some(conn);
+        true
+    }
+
+    fn get(&self, fd: RawFd) -> Option<&Conn> {
+        self.slots.get(fd as usize)?.as_deref()
+    }
+
+    fn get_mut(&mut self, fd: RawFd) -> Option<&mut Conn> {
+        self.slots.get_mut(fd as usize)?.as_deref_mut()
+    }
+
+    fn remove(&mut self, fd: RawFd) {
+        let idx = fd as usize;
+        if idx >= self.slots.len() {
+            return;
+        }
+
+        if let Some(mut conn) = self.slots[idx].take() {
+            conn.reset(Vec::new());
+            if self.pool.len() < self.pool_cap {
+                self.pool.push(conn);
+            }
         }
     }
 }
@@ -83,12 +149,13 @@ pub fn serve_fd_epoll(
 
     let timeout_ms = env_i32("FD_EPOLL_TIMEOUT_MS", 1);
     let keep_initial = env_bool("FD_CONTROL_PREBUFFER", false);
+    let conn_pool_cap = env_usize("FD_CONN_POOL_CAP", 512);
     let mut events = vec![empty_event(); MAX_EVENTS];
-    let mut controls = HashSet::<RawFd>::new();
-    let mut clients = HashMap::<RawFd, Conn>::with_capacity(4096);
+    let mut controls = Vec::<RawFd>::with_capacity(4);
+    let mut clients = ConnTable::new(conn_pool_cap);
 
     eprintln!(
-        "fd epoll raw enabled, control={control_path}, timeout_ms={timeout_ms}, keep_initial={keep_initial}"
+        "fd epoll raw enabled, control={control_path}, timeout_ms={timeout_ms}, keep_initial={keep_initial}, conn_pool_cap={conn_pool_cap}"
     );
 
     loop {
@@ -111,9 +178,9 @@ pub fn serve_fd_epoll(
                 continue;
             }
 
-            if controls.contains(&fd) {
+            if let Some(control_idx) = controls.iter().position(|&control| control == fd) {
                 if is_closed_event(flags) {
-                    controls.remove(&fd);
+                    controls.swap_remove(control_idx);
                     epoll_delete(epfd, fd);
                     close_fd(fd);
                     continue;
@@ -132,7 +199,7 @@ pub fn serve_fd_epoll(
             }
 
             let mut should_close = is_closed_event(flags);
-            if let Some(conn) = clients.get_mut(&fd) {
+            if let Some(conn) = clients.get_mut(fd) {
                 match handle_client(
                     fd,
                     flags,
@@ -150,10 +217,10 @@ pub fn serve_fd_epoll(
             }
 
             if should_close {
-                clients.remove(&fd);
+                clients.remove(fd);
                 epoll_delete(epfd, fd);
                 close_fd(fd);
-            } else if let Some(conn) = clients.get(&fd) {
+            } else if let Some(conn) = clients.get(fd) {
                 let _ = epoll_mod(epfd, fd, client_interest(!conn.pending.is_empty()));
             }
         }
@@ -163,7 +230,7 @@ pub fn serve_fd_epoll(
 fn accept_controls(
     listener: &UnixListener,
     epfd: RawFd,
-    controls: &mut HashSet<RawFd>,
+    controls: &mut Vec<RawFd>,
 ) -> Result<(), String> {
     loop {
         match listener.accept() {
@@ -176,7 +243,7 @@ fn accept_controls(
                     close_fd(fd);
                     return Err(format!("failed to register fd control stream: {err}"));
                 }
-                controls.insert(fd);
+                controls.push(fd);
             }
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(()),
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
@@ -190,7 +257,7 @@ fn receive_passed_fds(
     epfd: RawFd,
     control_fd: RawFd,
     keep_initial: bool,
-    clients: &mut HashMap<RawFd, Conn>,
+    clients: &mut ConnTable,
     index: &Index,
     params: &SearchParams,
     load: &AtomicUsize,
@@ -210,22 +277,43 @@ fn receive_passed_fds(
             return Err(format!("fd client nonblocking error: {err}"));
         }
 
-        let mut conn = Conn::new(received.initial);
-        if conn.tail > 0 {
-            let _ = parse_available(&mut conn, index, params, load, keep_alive_requests);
-            let _ = flush_pending(fd, &mut conn);
-        }
-
-        if conn.close_after_write && conn.pending.is_empty() {
+        if !clients.insert(fd, received.initial) {
             close_fd(fd);
             continue;
         }
 
-        if let Err(err) = epoll_add(epfd, fd, client_interest(!conn.pending.is_empty())) {
+        let mut close_now = false;
+        let mut has_pending = false;
+        let mut client_error = false;
+        if let Some(conn) = clients.get_mut(fd) {
+            if conn.tail > 0 {
+                if parse_available(fd, conn, index, params, load, keep_alive_requests).is_err()
+                    || flush_pending(fd, conn).is_err()
+                {
+                    client_error = true;
+                }
+            }
+            close_now = conn.close_after_write && conn.pending.is_empty();
+            has_pending = !conn.pending.is_empty();
+        }
+
+        if client_error {
+            clients.remove(fd);
+            close_fd(fd);
+            continue;
+        }
+
+        if close_now {
+            clients.remove(fd);
+            close_fd(fd);
+            continue;
+        }
+
+        if let Err(err) = epoll_add(epfd, fd, client_interest(has_pending)) {
+            clients.remove(fd);
             close_fd(fd);
             return Err(format!("failed to register fd client: {err}"));
         }
-        clients.insert(fd, conn);
     }
 }
 
@@ -247,7 +335,7 @@ fn handle_client(
 
     if flags & libc::EPOLLIN as u32 != 0 {
         read_available(fd, conn)?;
-        parse_available(conn, index, params, load, keep_alive_requests);
+        parse_available(fd, conn, index, params, load, keep_alive_requests)?;
         flush_pending(fd, conn)?;
     }
 
@@ -288,28 +376,29 @@ fn read_available(fd: RawFd, conn: &mut Conn) -> io::Result<()> {
 }
 
 fn parse_available(
+    fd: RawFd,
     conn: &mut Conn,
     index: &Index,
     params: &SearchParams,
     load: &AtomicUsize,
     keep_alive_requests: usize,
-) {
+) -> io::Result<()> {
     while conn.head < conn.tail {
         match parse_request(&conn.buf[conn.head..conn.tail]) {
             ParsedRequest::Incomplete => break,
             ParsedRequest::Bad => {
-                conn.pending.extend_from_slice(RESP_BAD_REQUEST);
+                write_or_buffer(fd, conn, RESP_BAD_REQUEST)?;
                 conn.close_after_write = true;
                 conn.head = conn.tail;
                 break;
             }
             ParsedRequest::Ready { consumed } => {
-                conn.pending.extend_from_slice(RESP_READY);
+                write_or_buffer(fd, conn, RESP_READY)?;
                 conn.head += consumed;
                 conn.handled += 1;
             }
             ParsedRequest::NotFound { consumed } => {
-                conn.pending.extend_from_slice(RESP_NOT_FOUND);
+                write_or_buffer(fd, conn, RESP_NOT_FOUND)?;
                 conn.head += consumed;
                 conn.handled += 1;
             }
@@ -322,7 +411,7 @@ fn parse_available(
                     let body = &conn.buf[conn.head + body_start..conn.head + body_end];
                     process_fraud(body, index, params, load)
                 };
-                conn.pending.extend_from_slice(response);
+                write_or_buffer(fd, conn, response)?;
                 conn.head += consumed;
                 conn.handled += 1;
             }
@@ -342,6 +431,42 @@ fn parse_available(
         conn.tail -= conn.head;
         conn.head = 0;
     }
+    Ok(())
+}
+
+fn write_or_buffer(fd: RawFd, conn: &mut Conn, response: &'static [u8]) -> io::Result<()> {
+    if !conn.pending.is_empty() {
+        conn.pending.extend_from_slice(response);
+        return Ok(());
+    }
+
+    let mut off = 0usize;
+    while off < response.len() {
+        let sent = unsafe {
+            libc::send(
+                fd,
+                response[off..].as_ptr().cast(),
+                response.len() - off,
+                send_flags(),
+            )
+        };
+        if sent == 0 {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "send returned zero"));
+        }
+        if sent < 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            if matches!(err.kind(), io::ErrorKind::WouldBlock) {
+                conn.pending.extend_from_slice(&response[off..]);
+                return Ok(());
+            }
+            return Err(err);
+        }
+        off += sent as usize;
+    }
+    Ok(())
 }
 
 fn flush_pending(fd: RawFd, conn: &mut Conn) -> io::Result<()> {
@@ -443,6 +568,13 @@ fn env_i32(name: &str, default: i32) -> i32 {
     env::var(name)
         .ok()
         .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(default)
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(default)
 }
 

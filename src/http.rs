@@ -29,14 +29,19 @@ const MAX_REQUEST_BYTES: usize = 32 * 1024;
 pub(crate) const RX_CAP: usize = 64 * 1024;
 const MAX_BATCHED_RESPONSES: usize = 16;
 
-const RESP_APPROVED_0: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}";
-const RESP_APPROVED_02: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}";
-const RESP_APPROVED_04: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.4}";
-const RESP_REJECTED_06: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}";
-const RESP_REJECTED_08: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}";
-const RESP_REJECTED_1: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}";
-pub(crate) const RESP_READY: &[u8] =
-    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nOK";
+const RESP_APPROVED_0: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Length:35\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}";
+const RESP_APPROVED_02: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Length:35\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}";
+const RESP_APPROVED_04: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Length:35\r\n\r\n{\"approved\":true,\"fraud_score\":0.4}";
+const RESP_REJECTED_06: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Length:36\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}";
+const RESP_REJECTED_08: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Length:36\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}";
+const RESP_REJECTED_1: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Length:36\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}";
+pub(crate) const RESP_READY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length:0\r\n\r\n";
 pub(crate) const RESP_NOT_FOUND: &[u8] =
     b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
 pub(crate) const RESP_BAD_REQUEST: &[u8] =
