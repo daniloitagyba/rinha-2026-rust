@@ -120,6 +120,27 @@ Eval direto da imagem final:
 Esse baseline e a referencia local para comparar com a execucao no servidor da
 Rinha, onde o objetivo e medir a diferenca entre a cauda local e a cauda remota.
 
+## Teste remoto
+
+O disparo do teste remoto segue o mesmo padrao usado no projeto .NET: abrir uma
+issue no repositorio oficial com titulo e corpo `rinha/test <submission>`.
+Neste projeto o nome da submissao e `itagyba-rust`.
+
+Para criar a issue e aguardar o resultado:
+
+```powershell
+.\scripts\request-remote-test.ps1
+```
+
+Para apenas criar a issue e sair:
+
+```powershell
+.\scripts\request-remote-test.ps1 -CreateOnly
+```
+
+Ultima issue remota solicitada para comparar com o baseline local:
+`https://github.com/zanfranceschi/rinha-de-backend-2026/issues/8279`.
+
 ## Estrutura de branches
 
 - `main`: codigo-fonte, Dockerfile, scripts, documentacao e arquivos de apoio.
