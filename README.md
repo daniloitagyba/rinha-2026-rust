@@ -60,15 +60,10 @@ Smoke com Docker Compose:
 scripts/smoke-compose.sh
 ```
 
-Teste local proximo da engine, sempre mirando a topologia `linux/amd64`:
-
-```powershell
-.\scripts\k6-local.ps1
-```
-
-```sh
-MODE=build sh scripts/k6-local.sh
-```
+Teste local proximo da engine, sempre mirando a topologia `linux/amd64`, deve
+usar WSL como caminho padrao. O fluxo completo, incluindo sincronizacao para uma
+pasta Linux temporaria e normalizacao de CRLF, esta em
+[`LOCAL_TEST_WSL.md`](LOCAL_TEST_WSL.md).
 
 ## Validacao
 

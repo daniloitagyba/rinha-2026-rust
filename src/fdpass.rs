@@ -52,7 +52,6 @@ pub fn receive_client_fd_raw(
 
         let fd = unsafe { first_rights_fd(&msg) }
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing SCM_RIGHTS fd"))?;
-        configure_client_fd(fd);
 
         let initial = if keep_initial {
             data[..received as usize].to_vec()
@@ -74,39 +73,4 @@ unsafe fn first_rights_fd(msg: &libc::msghdr) -> Option<RawFd> {
         cmsg = libc::CMSG_NXTHDR(msg, cmsg);
     }
     None
-}
-
-pub fn set_nonblocking(fd: RawFd) -> io::Result<()> {
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
-    if flags < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-pub fn configure_client_fd(fd: RawFd) {
-    let one: libc::c_int = 1;
-    unsafe {
-        let _ = libc::setsockopt(
-            fd,
-            libc::IPPROTO_TCP,
-            libc::TCP_NODELAY,
-            (&one as *const libc::c_int).cast(),
-            std::mem::size_of_val(&one) as libc::socklen_t,
-        );
-
-        #[cfg(target_os = "linux")]
-        {
-            let _ = libc::setsockopt(
-                fd,
-                libc::IPPROTO_TCP,
-                libc::TCP_QUICKACK,
-                (&one as *const libc::c_int).cast(),
-                std::mem::size_of_val(&one) as libc::socklen_t,
-            );
-        }
-    }
 }

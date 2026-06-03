@@ -272,11 +272,6 @@ fn receive_passed_fds(
             };
 
         let fd = received.fd;
-        if let Err(err) = fdpass::set_nonblocking(fd) {
-            close_fd(fd);
-            return Err(format!("fd client nonblocking error: {err}"));
-        }
-
         if !clients.insert(fd, received.initial) {
             close_fd(fd);
             continue;

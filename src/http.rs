@@ -270,12 +270,6 @@ fn receive_fd_control_loop(
         };
 
         let stream = unsafe { StdTcpStream::from_raw_fd(received.fd) };
-        let _ = stream.set_nodelay(true);
-        if let Err(err) = stream.set_nonblocking(true) {
-            eprintln!("fd client nonblocking error: {err}");
-            continue;
-        }
-
         let stream = match tokio::net::TcpStream::from_std(stream) {
             Ok(stream) => stream,
             Err(err) => {

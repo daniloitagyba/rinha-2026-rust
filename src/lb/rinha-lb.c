@@ -212,7 +212,8 @@ static int deliver_fd(int client_fd) {
 
 static void accept_clients(int listener, int accept_batch) {
     for (int accepted = 0; accepted < accept_batch; accepted++) {
-        int client_fd = accept4(listener, NULL, NULL, SOCK_CLOEXEC);
+        // Keep the client fd nonblocking across SCM_RIGHTS handoff; APIs do not redo fcntl.
+        int client_fd = accept4(listener, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
         if (client_fd < 0) {
             if (errno == EINTR) {
                 accepted--;
