@@ -9,15 +9,23 @@ use crate::index::{Index, SearchParams};
 use std::env;
 use std::fs;
 use std::io;
-use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::fd::RawFd;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::time::Instant;
 
 const MAX_EVENTS: usize = 1024;
 const MAX_FD_SLOTS: usize = 65_536;
+
+#[derive(Clone, Copy)]
+struct WaitTuning {
+    timeout_ms: i32,
+    spin_us: usize,
+    idle_us: usize,
+}
 
 struct Conn {
     buf: Vec<u8>,
@@ -128,14 +136,9 @@ pub fn serve_fd_epoll(
     }
     let _ = fs::remove_file(control_path);
 
-    let listener = UnixListener::bind(control_path)
-        .map_err(|e| format!("failed to bind fd control socket {control_path}: {e}"))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|e| format!("failed to set fd control socket nonblocking: {e}"))?;
+    let listener_fd = create_control_listener(control_path)?;
     set_unix_socket_permissions(control_path);
 
-    let listener_fd = listener.as_raw_fd();
     let epfd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
     if epfd < 0 {
         return Err(format!(
@@ -147,7 +150,11 @@ pub fn serve_fd_epoll(
     epoll_add(epfd, listener_fd, control_interest())
         .map_err(|e| format!("failed to register fd control listener: {e}"))?;
 
-    let timeout_ms = env_i32("FD_EPOLL_TIMEOUT_MS", 1);
+    let wait = WaitTuning {
+        timeout_ms: env_i32("FD_EPOLL_TIMEOUT_MS", 1),
+        spin_us: env_usize("FD_EPOLL_SPIN_US", 0),
+        idle_us: env_usize("FD_EPOLL_IDLE_US", 0),
+    };
     let keep_initial = env_bool("FD_CONTROL_PREBUFFER", false);
     let conn_pool_cap = env_usize("FD_CONN_POOL_CAP", 512);
     let mut events = vec![empty_event(); MAX_EVENTS];
@@ -155,26 +162,22 @@ pub fn serve_fd_epoll(
     let mut clients = ConnTable::new(conn_pool_cap);
 
     eprintln!(
-        "fd epoll raw enabled, control={control_path}, timeout_ms={timeout_ms}, keep_initial={keep_initial}, conn_pool_cap={conn_pool_cap}"
+        "fd epoll raw enabled, control={control_path}, timeout_ms={}, spin_us={}, idle_us={}, keep_initial={keep_initial}, conn_pool_cap={conn_pool_cap}",
+        wait.timeout_ms,
+        wait.spin_us,
+        wait.idle_us
     );
 
     loop {
-        let ready =
-            unsafe { libc::epoll_wait(epfd, events.as_mut_ptr(), events.len() as i32, timeout_ms) };
-        if ready < 0 {
-            let err = io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
-            return Err(format!("epoll wait failed: {err}"));
-        }
+        let ready = wait_events(epfd, &mut events, wait)
+            .map_err(|err| format!("epoll wait failed: {err}"))?;
 
         for event in events.iter().take(ready as usize) {
             let fd = event.u64 as RawFd;
             let flags = event.events;
 
             if fd == listener_fd {
-                accept_controls(&listener, epfd, &mut controls)?;
+                accept_controls(listener_fd, epfd, &mut controls)?;
                 continue;
             }
 
@@ -228,27 +231,36 @@ pub fn serve_fd_epoll(
 }
 
 fn accept_controls(
-    listener: &UnixListener,
+    listener_fd: RawFd,
     epfd: RawFd,
     controls: &mut Vec<RawFd>,
 ) -> Result<(), String> {
     loop {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                stream
-                    .set_nonblocking(true)
-                    .map_err(|e| format!("failed to set fd control stream nonblocking: {e}"))?;
-                let fd = stream.into_raw_fd();
+        let fd = unsafe {
+            libc::accept4(
+                listener_fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            )
+        };
+        if fd >= 0 {
                 if let Err(err) = epoll_add(epfd, fd, control_interest()) {
                     close_fd(fd);
                     return Err(format!("failed to register fd control stream: {err}"));
                 }
                 controls.push(fd);
-            }
-            Err(err) if err.kind() == io::ErrorKind::WouldBlock => return Ok(()),
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-            Err(err) => return Err(format!("fd control accept error: {err}")),
+            continue;
         }
+
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        if matches!(err.kind(), io::ErrorKind::WouldBlock) {
+            return Ok(());
+        }
+        return Err(format!("fd control accept error: {err}"));
     }
 }
 
@@ -547,6 +559,149 @@ fn close_fd(fd: RawFd) {
 
 fn empty_event() -> libc::epoll_event {
     libc::epoll_event { events: 0, u64: 0 }
+}
+
+fn create_control_listener(control_path: &str) -> Result<RawFd, String> {
+    let socket_type = if env_bool("FD_CONTROL_SEQPACKET", false) {
+        libc::SOCK_SEQPACKET
+    } else {
+        libc::SOCK_STREAM
+    };
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_UNIX,
+            socket_type | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "failed to create fd control socket {control_path}: {}",
+            io::Error::last_os_error()
+        ));
+    }
+
+    let path_bytes = Path::new(control_path).as_os_str().as_bytes();
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    if path_bytes.len() >= addr.sun_path.len() {
+        close_fd(fd);
+        return Err(format!("fd control socket path too long: {control_path}"));
+    }
+    for (slot, byte) in addr.sun_path.iter_mut().zip(path_bytes.iter()) {
+        *slot = *byte as libc::c_char;
+    }
+    let len =
+        (std::mem::size_of::<libc::sa_family_t>() + path_bytes.len() + 1) as libc::socklen_t;
+
+    if unsafe { libc::bind(fd, (&addr as *const libc::sockaddr_un).cast(), len) } < 0 {
+        let err = io::Error::last_os_error();
+        close_fd(fd);
+        return Err(format!("failed to bind fd control socket {control_path}: {err}"));
+    }
+    if unsafe { libc::listen(fd, env_i32("FD_CONTROL_BACKLOG", 4096)) } < 0 {
+        let err = io::Error::last_os_error();
+        close_fd(fd);
+        return Err(format!("failed to listen on fd control socket {control_path}: {err}"));
+    }
+
+    Ok(fd)
+}
+
+fn wait_events(
+    epfd: RawFd,
+    events: &mut [libc::epoll_event],
+    wait: WaitTuning,
+) -> io::Result<i32> {
+    if wait.spin_us == 0 && wait.idle_us == 0 {
+        return epoll_wait_ms(epfd, events, wait.timeout_ms);
+    }
+
+    let mut ready = epoll_wait_ms(epfd, events, 0)?;
+    if ready != 0 {
+        return Ok(ready);
+    }
+
+    if wait.spin_us > 0 {
+        let start = Instant::now();
+        while start.elapsed().as_micros() < wait.spin_us as u128 {
+            ready = epoll_wait_ms(epfd, events, 0)?;
+            if ready != 0 {
+                return Ok(ready);
+            }
+            std::hint::spin_loop();
+        }
+    }
+
+    if wait.idle_us == 0 {
+        epoll_wait_ms(epfd, events, -1)
+    } else {
+        epoll_wait_us(epfd, events, wait.idle_us)
+    }
+}
+
+fn epoll_wait_ms(
+    epfd: RawFd,
+    events: &mut [libc::epoll_event],
+    timeout_ms: i32,
+) -> io::Result<i32> {
+    loop {
+        let ready =
+            unsafe { libc::epoll_wait(epfd, events.as_mut_ptr(), events.len() as i32, timeout_ms) };
+        if ready >= 0 {
+            return Ok(ready);
+        }
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        return Err(err);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn epoll_wait_us(
+    epfd: RawFd,
+    events: &mut [libc::epoll_event],
+    timeout_us: usize,
+) -> io::Result<i32> {
+    let ts = libc::timespec {
+        tv_sec: (timeout_us / 1_000_000) as libc::time_t,
+        tv_nsec: ((timeout_us % 1_000_000) * 1000) as libc::c_long,
+    };
+    loop {
+        let ready = unsafe {
+            libc::epoll_pwait2(
+                epfd,
+                events.as_mut_ptr(),
+                events.len() as i32,
+                &ts,
+                std::ptr::null(),
+            )
+        };
+        if ready >= 0 {
+            return Ok(ready);
+        }
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        if err.raw_os_error() == Some(libc::ENOSYS) {
+            let timeout_ms = timeout_us.div_ceil(1000).min(i32::MAX as usize) as i32;
+            return epoll_wait_ms(epfd, events, timeout_ms);
+        }
+        return Err(err);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn epoll_wait_us(
+    epfd: RawFd,
+    events: &mut [libc::epoll_event],
+    timeout_us: usize,
+) -> io::Result<i32> {
+    let timeout_ms = timeout_us.div_ceil(1000).min(i32::MAX as usize) as i32;
+    epoll_wait_ms(epfd, events, timeout_ms)
 }
 
 #[cfg(target_os = "linux")]

@@ -29,6 +29,7 @@ static int fd_control_seqpacket = 0;
 static int lb_preconnect_control = 1;
 static int lb_tcp_nodelay = 1;
 static int lb_socket_buffers = 1;
+static int lb_sendmsg_dontwait = 0;
 static int socket_buffer_size = 16384;
 
 static int env_enabled(const char *name, int fallback) {
@@ -157,7 +158,7 @@ static unsigned int choose_backend(void) {
     return backend;
 }
 
-static int send_fd(int control_fd, int fd_to_send) {
+static int send_fd_with_flags(int control_fd, int fd_to_send, int flags) {
     char data = 0;
     struct iovec io;
     io.iov_base = &data;
@@ -181,15 +182,26 @@ static int send_fd(int control_fd, int fd_to_send) {
     msg.msg_controllen = cmsg->cmsg_len;
 
     for (;;) {
-        ssize_t sent = sendmsg(control_fd, &msg, MSG_NOSIGNAL);
+        ssize_t sent = sendmsg(control_fd, &msg, flags);
         if (sent == 1) {
             return 0;
         }
         if (sent < 0 && errno == EINTR) {
             continue;
         }
+        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return 1;
+        }
         return -1;
     }
+}
+
+static int send_fd(int control_fd, int fd_to_send) {
+    int flags = MSG_NOSIGNAL;
+    if (lb_sendmsg_dontwait) {
+        flags |= MSG_DONTWAIT;
+    }
+    return send_fd_with_flags(control_fd, fd_to_send, flags);
 }
 
 static int deliver_fd(int client_fd) {
@@ -197,13 +209,26 @@ static int deliver_fd(int client_fd) {
     for (unsigned int attempt = 0; attempt < backend_count; attempt++) {
         unsigned int index = (start + attempt) % backend_count;
         int control_fd = ensure_control(index);
-        if (control_fd >= 0 && send_fd(control_fd, client_fd) == 0) {
-            return 0;
+        if (control_fd >= 0) {
+            int result = send_fd(control_fd, client_fd);
+            if (result == 0) {
+                return 0;
+            }
+            if (result > 0) {
+                continue;
+            }
         }
 
         if (control_fds[index] >= 0) {
             close(control_fds[index]);
             control_fds[index] = -1;
+        }
+    }
+
+    if (lb_sendmsg_dontwait) {
+        int control_fd = ensure_control(start);
+        if (control_fd >= 0 && send_fd_with_flags(control_fd, client_fd, MSG_NOSIGNAL) == 0) {
+            return 0;
         }
     }
 
@@ -273,6 +298,7 @@ int main(void) {
     lb_preconnect_control = env_enabled("LB_PRECONNECT_CONTROL", 1);
     lb_tcp_nodelay = env_enabled("LB_TCP_NODELAY", 1);
     lb_socket_buffers = env_enabled("LB_SOCKET_BUFFERS", 1);
+    lb_sendmsg_dontwait = env_enabled("LB_SENDMSG_DONTWAIT", 0);
     socket_buffer_size = env_int("SOCKET_BUFFER_SIZE", 16384);
 
     int port = env_int("LB_PORT", 9999);

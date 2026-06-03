@@ -35,6 +35,8 @@ services:
     environment:
       BIND_ADDR: fd:/sockets/api1.sock.ctrl
       FD_EPOLL_RAW: "1"
+      FD_EPOLL_SPIN_US: "15"
+      FD_EPOLL_IDLE_US: "40"
       INDEX_PATH: /app/data/references.idx
       INDEX_HUGEPAGES: "1"
       PREFETCH_INDEX: "true"
@@ -90,6 +92,8 @@ services:
     environment:
       BIND_ADDR: fd:/sockets/api2.sock.ctrl
       FD_EPOLL_RAW: "1"
+      FD_EPOLL_SPIN_US: "15"
+      FD_EPOLL_IDLE_US: "40"
       INDEX_PATH: /app/data/references.idx
       INDEX_HUGEPAGES: "1"
       PREFETCH_INDEX: "true"
