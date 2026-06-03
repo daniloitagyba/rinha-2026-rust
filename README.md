@@ -120,27 +120,6 @@ Eval direto da imagem final:
 Esse baseline e a referencia local para comparar com a execucao no servidor da
 Rinha, onde o objetivo e medir a diferenca entre a cauda local e a cauda remota.
 
-## Teste remoto
-
-O disparo do teste remoto segue o mesmo padrao usado no projeto .NET: abrir uma
-issue no repositorio oficial com titulo e corpo `rinha/test <submission>`.
-Neste projeto o nome da submissao e `itagyba-rust`.
-
-Para criar a issue e aguardar o resultado:
-
-```powershell
-.\scripts\request-remote-test.ps1
-```
-
-Para apenas criar a issue e sair:
-
-```powershell
-.\scripts\request-remote-test.ps1 -CreateOnly
-```
-
-Ultima issue remota solicitada para comparar com o baseline local:
-`https://github.com/zanfranceschi/rinha-de-backend-2026/issues/8279`.
-
 ## Estrutura de branches
 
 - `main`: codigo-fonte, Dockerfile, scripts, documentacao e arquivos de apoio.
@@ -163,6 +142,9 @@ A imagem final deve ser publicada como `linux/amd64` contendo:
 
 O compose da branch `submission` usa somente imagens publicas e define
 `platform: linux/amd64` para todos os servicos.
+
+O procedimento para disparar e acompanhar o teste remoto esta em
+[`REMOTE_TEST.md`](REMOTE_TEST.md).
 
 O perfil padrao usa `FD_EPOLL_RAW=1`, `PROFILE_FASTPATH=1`,
 `PROFILE_DOMINANT_FASTPATH=0`, `PROFILE_FASTPATH_REFERENCE_SHA256`,
