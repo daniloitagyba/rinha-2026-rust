@@ -2,21 +2,77 @@
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+TEST_MOUNT="${TEST_MOUNT:-$ROOT/test}"
 MODE="${MODE:-submission}"
+RUNNER_PRESET="${RUNNER_PRESET:-default}"
 PROJECT_NAME="${PROJECT_NAME:-rinha-rust-local}"
 K6_IMAGE="${K6_IMAGE:-grafana/k6:latest}"
+SUBMISSION_COMPOSE_FILE="${SUBMISSION_COMPOSE_FILE:-}"
 KEEP_SERVICES="${KEEP_SERVICES:-0}"
 REFRESH_DATA="${REFRESH_DATA:-0}"
 PULL="${PULL:-0}"
 OVERRIDE_FILE=""
+EXTRA_COMPOSE_FILE="${EXTRA_COMPOSE_FILE:-}"
+DOCKER_OS=""
+
+if command -v docker >/dev/null 2>&1; then
+  DOCKER_OS="$(docker info --format '{{.OperatingSystem}}' 2>/dev/null || true)"
+fi
+
+if [ -z "${DOCKER_CONFIG:-}" ] && \
+   [ -n "$DOCKER_OS" ] && \
+   [ "$DOCKER_OS" != "Docker Desktop" ] && \
+   [ -f "$HOME/.docker/config.json" ] && \
+   grep -Eq '"credsStore"[[:space:]]*:[[:space:]]*"desktop\.exe"' "$HOME/.docker/config.json"; then
+  DOCKER_CONFIG="${TMPDIR:-/tmp}/docker-anon"
+  mkdir -p "$DOCKER_CONFIG"
+  printf '{"auths":{}}\n' > "$DOCKER_CONFIG/config.json"
+  export DOCKER_CONFIG
+fi
+
+case "$RUNNER_PRESET" in
+  default)
+    ;;
+  remote-ryzen)
+    API_CPU="${API_CPU:-0.300}"
+    LB_CPU="${LB_CPU:-0.110}"
+    ;;
+  remote-ryzen-hard)
+    API_CPU="${API_CPU:-0.300}"
+    LB_CPU="${LB_CPU:-0.108}"
+    ;;
+  *)
+    echo "RUNNER_PRESET must be default, remote-ryzen or remote-ryzen-hard" >&2
+    exit 2
+    ;;
+esac
 
 if [ "$MODE" = "submission" ]; then
-  COMPOSE_FILE="$ROOT/submission/docker-compose.yml"
+  if [ -n "$SUBMISSION_COMPOSE_FILE" ]; then
+    COMPOSE_FILE="$SUBMISSION_COMPOSE_FILE"
+  elif [ -f "$ROOT/../rinha-2026-rust-submission/docker-compose.yml" ]; then
+    COMPOSE_FILE="$ROOT/../rinha-2026-rust-submission/docker-compose.yml"
+  elif [ -f "/mnt/c/tmp/rinha-2026-rust-submission/docker-compose.yml" ]; then
+    COMPOSE_FILE="/mnt/c/tmp/rinha-2026-rust-submission/docker-compose.yml"
+  else
+    COMPOSE_FILE="$ROOT/submission/docker-compose.yml"
+  fi
 elif [ "$MODE" = "build" ]; then
   COMPOSE_FILE="$ROOT/docker-compose.yml"
 else
   echo "MODE must be submission or build" >&2
   exit 2
+fi
+
+if [ "$MODE" = "build" ] && \
+   [ -z "${COMPOSE_BAKE+x}" ] && \
+   [ -n "$DOCKER_OS" ] && \
+   [ "$DOCKER_OS" != "Docker Desktop" ]; then
+  export COMPOSE_BAKE=false
+fi
+
+if [ "$MODE" = "build" ] && [ -z "${COMPOSE_PARALLEL_LIMIT:-}" ]; then
+  export COMPOSE_PARALLEL_LIMIT=1
 fi
 
 if [ "$REFRESH_DATA" = "1" ] || [ ! -f "$ROOT/test/test-data.json" ]; then
@@ -31,9 +87,19 @@ if [ "$MODE" = "build" ] && { [ "$REFRESH_DATA" = "1" ] || [ ! -f "$ROOT/resourc
     https://raw.githubusercontent.com/zanfranceschi/rinha-de-backend-2026/main/resources/references.json.gz
 fi
 
+if [ -f "$ROOT/resources/references.json.gz" ]; then
+  refs_sha="$(sha256sum "$ROOT/resources/references.json.gz" | awk '{print $1}')"
+  PROFILE_FASTPATH_REFERENCE_SHA256="${PROFILE_FASTPATH_REFERENCE_SHA256:-$refs_sha}"
+  EXPECTED_REFERENCES_GZIP_SHA256="${EXPECTED_REFERENCES_GZIP_SHA256:-$refs_sha}"
+fi
+
 compose() {
-  if [ -n "$OVERRIDE_FILE" ]; then
+  if [ -n "$OVERRIDE_FILE" ] && [ -n "$EXTRA_COMPOSE_FILE" ]; then
+    docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" -f "$EXTRA_COMPOSE_FILE" -f "$OVERRIDE_FILE" "$@"
+  elif [ -n "$OVERRIDE_FILE" ]; then
     docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" -f "$OVERRIDE_FILE" "$@"
+  elif [ -n "$EXTRA_COMPOSE_FILE" ]; then
+    docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" -f "$EXTRA_COMPOSE_FILE" "$@"
   else
     docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
   fi
@@ -41,7 +107,7 @@ compose() {
 
 cleanup() {
   if [ "$KEEP_SERVICES" != "1" ]; then
-    compose down --remove-orphans >/dev/null 2>&1 || true
+    compose down --remove-orphans -v >/dev/null 2>&1 || true
   fi
 
   if [ -n "$OVERRIDE_FILE" ]; then
@@ -54,36 +120,143 @@ if [ -n "${EARLY_CANDIDATES:-}" ] || \
    [ -n "${MIN_CANDIDATES:-}" ] || \
    [ -n "${MAX_CANDIDATES:-}" ] || \
    [ -n "${PROFILE_FASTPATH:-}" ] || \
+   [ -n "${PROFILE_FASTPATH_REFERENCE_SHA256:-}" ] || \
+   [ -n "${EXPECTED_REFERENCES_GZIP_SHA256:-}" ] || \
    [ -n "${PROFILE_MIN_COUNT:-}" ] || \
+   [ -n "${PROFILE_LEGIT_MIN_COUNT:-}" ] || \
+   [ -n "${PROFILE_FRAUD_MIN_COUNT:-}" ] || \
+   [ -n "${PROFILE_DOMINANT_FASTPATH:-}" ] || \
+   [ -n "${PROFILE_DOMINANT_MIN_COUNT:-}" ] || \
+   [ -n "${PROFILE_DOMINANT_MAX_OPPOSITE:-}" ] || \
    [ -n "${EXACT_FALLBACK:-}" ] || \
+   [ -n "${EARLY_EDGE_FALLBACK:-}" ] || \
+   [ -n "${RISKY_AMOUNT_MIN:-}" ] || \
+   [ -n "${RISKY_AMOUNT_MAX:-}" ] || \
+   [ -n "${RISKY_INSTALLMENTS_MIN:-}" ] || \
+   [ -n "${RISKY_INSTALLMENTS_MAX:-}" ] || \
+   [ -n "${RISKY_RATIO_MIN:-}" ] || \
+   [ -n "${RISKY_KM_HOME_MIN:-}" ] || \
+   [ -n "${RISKY_KM_HOME_MAX:-}" ] || \
+   [ -n "${RISKY_TX24H_MIN:-}" ] || \
+   [ -n "${RISKY_TX24H_MAX:-}" ] || \
+   [ -n "${RISKY_MERCHANT_AVG_MIN:-}" ] || \
+   [ -n "${RISKY_MERCHANT_AVG_MAX:-}" ] || \
    [ -n "${FAST_PATH:-}" ] || \
-   [ -n "${WORKERS:-}" ]; then
-  OVERRIDE_FILE="${TMPDIR:-/tmp}/${PROJECT_NAME}.override.yml"
+   [ -n "${WORKERS:-}" ] || \
+   [ -n "${KEEP_ALIVE_REQUESTS:-}" ] || \
+   [ -n "${API_CPU:-}" ] || \
+   [ -n "${API_MEMORY:-}" ] || \
+   [ -n "${API_CPUSET:-}" ] || \
+   [ -n "${API1_CPUSET:-}" ] || \
+   [ -n "${API2_CPUSET:-}" ] || \
+   [ -n "${LB_CPU:-}" ] || \
+   [ -n "${LB_MEMORY:-}" ] || \
+   [ -n "${LB_CPUSET:-}" ]; then
+  OVERRIDE_FILE="${OVERRIDE_FILE_PATH:-${TMPDIR:-/tmp}/${PROJECT_NAME}.override.yml}"
   {
     echo "services:"
+    if [ -n "${LB_CPU:-}" ] || [ -n "${LB_MEMORY:-}" ] || [ -n "${LB_CPUSET:-}" ]; then
+      echo "  lb:"
+      [ -n "${LB_CPUSET:-}" ] && echo "    cpuset: \"$LB_CPUSET\""
+      if [ -n "${LB_CPU:-}" ] || [ -n "${LB_MEMORY:-}" ]; then
+        echo "    deploy:"
+        echo "      resources:"
+        echo "        limits:"
+        [ -n "${LB_CPU:-}" ] && echo "          cpus: \"$LB_CPU\""
+        [ -n "${LB_MEMORY:-}" ] && echo "          memory: \"$LB_MEMORY\""
+      fi
+    fi
+
     for service in api1 api2; do
+      service_cpuset="${API_CPUSET:-}"
+      if [ "$service" = "api1" ] && [ -n "${API1_CPUSET:-}" ]; then
+        service_cpuset="$API1_CPUSET"
+      fi
+      if [ "$service" = "api2" ] && [ -n "${API2_CPUSET:-}" ]; then
+        service_cpuset="$API2_CPUSET"
+      fi
+
       echo "  $service:"
-      echo "    environment:"
-      [ -n "${EARLY_CANDIDATES:-}" ] && echo "      EARLY_CANDIDATES: \"$EARLY_CANDIDATES\""
-      [ -n "${MIN_CANDIDATES:-}" ] && echo "      MIN_CANDIDATES: \"$MIN_CANDIDATES\""
-      [ -n "${MAX_CANDIDATES:-}" ] && echo "      MAX_CANDIDATES: \"$MAX_CANDIDATES\""
-      [ -n "${PROFILE_FASTPATH:-}" ] && echo "      PROFILE_FASTPATH: \"$PROFILE_FASTPATH\""
-      [ -n "${PROFILE_MIN_COUNT:-}" ] && echo "      PROFILE_MIN_COUNT: \"$PROFILE_MIN_COUNT\""
-      [ -n "${EXACT_FALLBACK:-}" ] && echo "      EXACT_FALLBACK: \"$EXACT_FALLBACK\""
-      [ -n "${FAST_PATH:-}" ] && echo "      FAST_PATH: \"$FAST_PATH\""
-      [ -n "${WORKERS:-}" ] && echo "      WORKERS: \"$WORKERS\""
+      [ -n "$service_cpuset" ] && echo "    cpuset: \"$service_cpuset\""
+      if [ -n "${EARLY_CANDIDATES:-}" ] || \
+         [ -n "${MIN_CANDIDATES:-}" ] || \
+        [ -n "${MAX_CANDIDATES:-}" ] || \
+         [ -n "${PROFILE_FASTPATH:-}" ] || \
+         [ -n "${PROFILE_FASTPATH_REFERENCE_SHA256:-}" ] || \
+         [ -n "${EXPECTED_REFERENCES_GZIP_SHA256:-}" ] || \
+         [ -n "${PROFILE_MIN_COUNT:-}" ] || \
+         [ -n "${PROFILE_LEGIT_MIN_COUNT:-}" ] || \
+         [ -n "${PROFILE_FRAUD_MIN_COUNT:-}" ] || \
+         [ -n "${PROFILE_DOMINANT_FASTPATH:-}" ] || \
+         [ -n "${PROFILE_DOMINANT_MIN_COUNT:-}" ] || \
+         [ -n "${PROFILE_DOMINANT_MAX_OPPOSITE:-}" ] || \
+         [ -n "${EXACT_FALLBACK:-}" ] || \
+         [ -n "${EARLY_EDGE_FALLBACK:-}" ] || \
+         [ -n "${RISKY_AMOUNT_MIN:-}" ] || \
+         [ -n "${RISKY_AMOUNT_MAX:-}" ] || \
+         [ -n "${RISKY_INSTALLMENTS_MIN:-}" ] || \
+         [ -n "${RISKY_INSTALLMENTS_MAX:-}" ] || \
+         [ -n "${RISKY_RATIO_MIN:-}" ] || \
+         [ -n "${RISKY_KM_HOME_MIN:-}" ] || \
+         [ -n "${RISKY_KM_HOME_MAX:-}" ] || \
+         [ -n "${RISKY_TX24H_MIN:-}" ] || \
+         [ -n "${RISKY_TX24H_MAX:-}" ] || \
+         [ -n "${RISKY_MERCHANT_AVG_MIN:-}" ] || \
+         [ -n "${RISKY_MERCHANT_AVG_MAX:-}" ] || \
+         [ -n "${FAST_PATH:-}" ] || \
+         [ -n "${WORKERS:-}" ] || \
+         [ -n "${KEEP_ALIVE_REQUESTS:-}" ]; then
+        echo "    environment:"
+        [ -n "${EARLY_CANDIDATES:-}" ] && echo "      EARLY_CANDIDATES: \"$EARLY_CANDIDATES\""
+        [ -n "${MIN_CANDIDATES:-}" ] && echo "      MIN_CANDIDATES: \"$MIN_CANDIDATES\""
+        [ -n "${MAX_CANDIDATES:-}" ] && echo "      MAX_CANDIDATES: \"$MAX_CANDIDATES\""
+        [ -n "${PROFILE_FASTPATH:-}" ] && echo "      PROFILE_FASTPATH: \"$PROFILE_FASTPATH\""
+        [ -n "${PROFILE_FASTPATH_REFERENCE_SHA256:-}" ] && echo "      PROFILE_FASTPATH_REFERENCE_SHA256: \"$PROFILE_FASTPATH_REFERENCE_SHA256\""
+        [ -n "${EXPECTED_REFERENCES_GZIP_SHA256:-}" ] && echo "      EXPECTED_REFERENCES_GZIP_SHA256: \"$EXPECTED_REFERENCES_GZIP_SHA256\""
+        [ -n "${PROFILE_MIN_COUNT:-}" ] && echo "      PROFILE_MIN_COUNT: \"$PROFILE_MIN_COUNT\""
+        [ -n "${PROFILE_LEGIT_MIN_COUNT:-}" ] && echo "      PROFILE_LEGIT_MIN_COUNT: \"$PROFILE_LEGIT_MIN_COUNT\""
+        [ -n "${PROFILE_FRAUD_MIN_COUNT:-}" ] && echo "      PROFILE_FRAUD_MIN_COUNT: \"$PROFILE_FRAUD_MIN_COUNT\""
+        [ -n "${PROFILE_DOMINANT_FASTPATH:-}" ] && echo "      PROFILE_DOMINANT_FASTPATH: \"$PROFILE_DOMINANT_FASTPATH\""
+        [ -n "${PROFILE_DOMINANT_MIN_COUNT:-}" ] && echo "      PROFILE_DOMINANT_MIN_COUNT: \"$PROFILE_DOMINANT_MIN_COUNT\""
+        [ -n "${PROFILE_DOMINANT_MAX_OPPOSITE:-}" ] && echo "      PROFILE_DOMINANT_MAX_OPPOSITE: \"$PROFILE_DOMINANT_MAX_OPPOSITE\""
+        [ -n "${EXACT_FALLBACK:-}" ] && echo "      EXACT_FALLBACK: \"$EXACT_FALLBACK\""
+        [ -n "${EARLY_EDGE_FALLBACK:-}" ] && echo "      EARLY_EDGE_FALLBACK: \"$EARLY_EDGE_FALLBACK\""
+        [ -n "${RISKY_AMOUNT_MIN:-}" ] && echo "      RISKY_AMOUNT_MIN: \"$RISKY_AMOUNT_MIN\""
+        [ -n "${RISKY_AMOUNT_MAX:-}" ] && echo "      RISKY_AMOUNT_MAX: \"$RISKY_AMOUNT_MAX\""
+        [ -n "${RISKY_INSTALLMENTS_MIN:-}" ] && echo "      RISKY_INSTALLMENTS_MIN: \"$RISKY_INSTALLMENTS_MIN\""
+        [ -n "${RISKY_INSTALLMENTS_MAX:-}" ] && echo "      RISKY_INSTALLMENTS_MAX: \"$RISKY_INSTALLMENTS_MAX\""
+        [ -n "${RISKY_RATIO_MIN:-}" ] && echo "      RISKY_RATIO_MIN: \"$RISKY_RATIO_MIN\""
+        [ -n "${RISKY_KM_HOME_MIN:-}" ] && echo "      RISKY_KM_HOME_MIN: \"$RISKY_KM_HOME_MIN\""
+        [ -n "${RISKY_KM_HOME_MAX:-}" ] && echo "      RISKY_KM_HOME_MAX: \"$RISKY_KM_HOME_MAX\""
+        [ -n "${RISKY_TX24H_MIN:-}" ] && echo "      RISKY_TX24H_MIN: \"$RISKY_TX24H_MIN\""
+        [ -n "${RISKY_TX24H_MAX:-}" ] && echo "      RISKY_TX24H_MAX: \"$RISKY_TX24H_MAX\""
+        [ -n "${RISKY_MERCHANT_AVG_MIN:-}" ] && echo "      RISKY_MERCHANT_AVG_MIN: \"$RISKY_MERCHANT_AVG_MIN\""
+        [ -n "${RISKY_MERCHANT_AVG_MAX:-}" ] && echo "      RISKY_MERCHANT_AVG_MAX: \"$RISKY_MERCHANT_AVG_MAX\""
+        [ -n "${FAST_PATH:-}" ] && echo "      FAST_PATH: \"$FAST_PATH\""
+        [ -n "${WORKERS:-}" ] && echo "      WORKERS: \"$WORKERS\""
+        [ -n "${KEEP_ALIVE_REQUESTS:-}" ] && echo "      KEEP_ALIVE_REQUESTS: \"$KEEP_ALIVE_REQUESTS\""
+      fi
+      if [ -n "${API_CPU:-}" ] || [ -n "${API_MEMORY:-}" ]; then
+        echo "    deploy:"
+        echo "      resources:"
+        echo "        limits:"
+        [ -n "${API_CPU:-}" ] && echo "          cpus: \"$API_CPU\""
+        [ -n "${API_MEMORY:-}" ] && echo "          memory: \"$API_MEMORY\""
+      fi
     done
   } > "$OVERRIDE_FILE"
 fi
 
 if [ "$PULL" = "1" ] || [ "$MODE" = "submission" ]; then
+  compose down --remove-orphans -v >/dev/null 2>&1 || true
   compose pull
 fi
 
 if [ "$MODE" = "build" ]; then
-  docker build -t ghcr.io/daniloitagyba/rinha-2026-rust:latest "$ROOT"
-  compose up -d --remove-orphans
+  compose down --remove-orphans -v >/dev/null 2>&1 || true
+  compose up -d --build --remove-orphans
 else
+  compose down --remove-orphans -v >/dev/null 2>&1 || true
   compose up -d --remove-orphans
 fi
 
@@ -111,5 +284,5 @@ docker run --rm \
   -e PRE_ALLOCATED_VUS \
   -e MAX_VUS \
   -e REQUEST_TIMEOUT \
-  -v "$ROOT/test:/scripts" \
+  -v "$TEST_MOUNT:/scripts" \
   "$K6_IMAGE" run /scripts/test.js

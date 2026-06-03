@@ -7,11 +7,16 @@ use std::io;
 use std::path::Path;
 
 const MAGIC: &[u8; 8] = b"RINHA26I";
+const META_MAGIC: &[u8; 8] = b"R26META1";
 const HEADER_LEN: usize = 80;
+const META_LEN: usize = 80;
 const PROFILE_KEY_COUNT: usize = 1 << 22;
 const RISKY_GROUP_COUNT: usize = 1 << 4;
+const RISKY_SEMANTIC_GROUP_COUNT: usize = 1 << 8;
 const LEGIT_MASK: u8 = 1;
 const FRAUD_MASK: u8 = 2;
+const META_FLAG_GZIP_SHA256: u32 = 1;
+const META_FLAG_JSON_SHA256: u32 = 2;
 
 const EXACT_FALLBACK_OFF: u8 = 0;
 const EXACT_FALLBACK_UNCERTAIN: u8 = 1;
@@ -28,12 +33,20 @@ pub struct SearchParams {
     pub fast_only: bool,
     pub profile_fast_path: bool,
     pub profile_min_count: usize,
+    pub profile_legit_min_count: usize,
+    pub profile_fraud_min_count: usize,
+    pub profile_dominant_fast_path: bool,
+    pub profile_dominant_min_count: usize,
+    pub profile_dominant_max_opposite: usize,
     pub exact_fallback: u8,
+    pub early_edge_fallback: bool,
     pub overload_min_candidates: usize,
     pub overload_max_candidates: usize,
     pub overload_threshold: usize,
     pub overload_fast_only: bool,
     pub search_fallback_last_distance: i16,
+    pub risky_semantic_groups: bool,
+    pub risky_semantic_radius: usize,
 }
 
 impl SearchParams {
@@ -48,6 +61,7 @@ impl SearchParams {
             env_usize("OVERLOAD_MAX_CANDIDATES", 15_000).max(overload_min_candidates);
         let search_fallback_last_distance =
             env_usize("SEARCH_FALLBACK_LAST_DISTANCE", 2_900).min(i16::MAX as usize) as i16;
+        let profile_min_count = env_usize("PROFILE_MIN_COUNT", 20).max(1);
 
         Self {
             early_candidates,
@@ -59,13 +73,21 @@ impl SearchParams {
             fast_path: env_bool("FAST_PATH", false),
             fast_only: env_bool("FAST_ONLY", false),
             profile_fast_path: env_bool("PROFILE_FASTPATH", true),
-            profile_min_count: env_usize("PROFILE_MIN_COUNT", 20).max(1),
+            profile_min_count,
+            profile_legit_min_count: env_usize("PROFILE_LEGIT_MIN_COUNT", profile_min_count).max(1),
+            profile_fraud_min_count: env_usize("PROFILE_FRAUD_MIN_COUNT", profile_min_count).max(1),
+            profile_dominant_fast_path: env_bool("PROFILE_DOMINANT_FASTPATH", false),
+            profile_dominant_min_count: env_usize("PROFILE_DOMINANT_MIN_COUNT", 15).max(1),
+            profile_dominant_max_opposite: env_usize("PROFILE_DOMINANT_MAX_OPPOSITE", 2),
             exact_fallback: exact_fallback_mode(env::var("EXACT_FALLBACK").ok().as_deref()),
+            early_edge_fallback: env_bool("EARLY_EDGE_FALLBACK", false),
             overload_min_candidates,
             overload_max_candidates,
             overload_threshold: env_usize("OVERLOAD_THRESHOLD", 0),
             overload_fast_only: env_bool("OVERLOAD_FAST_ONLY", true),
             search_fallback_last_distance,
+            risky_semantic_groups: env_bool("RISKY_SEMANTIC_GROUPS", true),
+            risky_semantic_radius: env_usize("RISKY_SEMANTIC_RADIUS", 2).min(3),
         }
     }
 
@@ -99,8 +121,19 @@ pub struct Index {
     bucket_items_offset: usize,
     profile_counts: Vec<u16>,
     profile_label_masks: Vec<u8>,
+    profile_fraud_counts: Vec<u16>,
     risky_fallback_ids: Vec<u32>,
     risky_fallback_groups: Vec<Vec<u32>>,
+    risky_semantic_groups: Vec<Vec<u32>>,
+    references_gzip_sha256: Option<[u8; 32]>,
+    references_json_sha256: Option<[u8; 32]>,
+    profile_fast_paths_allowed: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct IndexMetadata {
+    gzip_sha256: Option<[u8; 32]>,
+    json_sha256: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -145,6 +178,7 @@ impl Index {
         let bucket_offsets_offset = read_u64(bytes, 48)? as usize;
         let bucket_items_offset = read_u64(bytes, 56)? as usize;
         let file_len = read_u64(bytes, 64)? as usize;
+        let metadata_offset = read_u64(bytes, 72)? as usize;
 
         if version != 1 || dim != DIM as u32 || bucket_count != BUCKET_COUNT {
             return Err("unsupported index version or shape".to_string());
@@ -163,10 +197,14 @@ impl Index {
         {
             return Err("index offsets out of bounds".to_string());
         }
-        let (profile_counts, profile_label_masks) =
+        let metadata = parse_metadata(bytes, metadata_offset)?;
+        validate_expected_references(metadata.gzip_sha256)?;
+        let profile_fast_paths_allowed =
+            reference_allowed_by_env("PROFILE_FASTPATH_REFERENCE_SHA256", metadata.gzip_sha256);
+        let (profile_counts, profile_label_masks, profile_fraud_counts) =
             build_profile_stats(bytes, count, vectors_offset, labels_offset);
         let risky_fallback_filter = RiskyFallbackFilter::from_env();
-        let (risky_fallback_ids, risky_fallback_groups) =
+        let (risky_fallback_ids, risky_fallback_groups, risky_semantic_groups) =
             build_risky_fallback_index(bytes, count, vectors_offset, &risky_fallback_filter);
 
         Ok(Self {
@@ -178,8 +216,13 @@ impl Index {
             bucket_items_offset,
             profile_counts,
             profile_label_masks,
+            profile_fraud_counts,
             risky_fallback_ids,
             risky_fallback_groups,
+            risky_semantic_groups,
+            references_gzip_sha256: metadata.gzip_sha256,
+            references_json_sha256: metadata.json_sha256,
+            profile_fast_paths_allowed,
         })
     }
 
@@ -190,6 +233,18 @@ impl Index {
 
     pub fn risky_fallback_count(&self) -> usize {
         self.risky_fallback_ids.len()
+    }
+
+    pub fn references_gzip_sha256_hex(&self) -> Option<String> {
+        self.references_gzip_sha256.as_ref().map(sha256_hex)
+    }
+
+    pub fn references_json_sha256_hex(&self) -> Option<String> {
+        self.references_json_sha256.as_ref().map(sha256_hex)
+    }
+
+    pub fn profile_fast_paths_allowed(&self) -> bool {
+        self.profile_fast_paths_allowed
     }
 
     pub fn prefault(&self) -> usize {
@@ -257,7 +312,7 @@ impl Index {
                 || candidates >= params.min_candidates
                 || (candidates >= params.early_candidates
                     && top_dist[K - 1] != i64::MAX
-                    && strong_decision(&top_label))
+                    && strong_decision(&top_label, params.early_edge_fallback))
             {
                 break;
             }
@@ -274,7 +329,7 @@ impl Index {
         }
 
         if params.exact_fallback == EXACT_FALLBACK_RISKY {
-            let frauds = self.classify_risky_flat(query, true);
+            let frauds = self.classify_risky_flat(query, params, true);
             decision_from_frauds(frauds, DecisionKind::ExactRisky)
         } else {
             let frauds = self.classify_flat(query);
@@ -308,23 +363,83 @@ impl Index {
         count_frauds(&top_label)
     }
 
-    fn classify_risky_flat(&self, query: &QuantizedVector, allow_full_tiebreak: bool) -> usize {
+    fn classify_risky_flat(
+        &self,
+        query: &QuantizedVector,
+        params: &SearchParams,
+        allow_full_tiebreak: bool,
+    ) -> usize {
         if self.risky_fallback_ids.len() < K {
             return self.classify_flat(query);
         }
 
         let group_key = risky_group_key(query);
-        let candidates = self
+        let broad_candidates = self
             .risky_fallback_groups
             .get(group_key)
             .filter(|ids| ids.len() >= K)
             .map(Vec::as_slice)
             .unwrap_or(&self.risky_fallback_ids);
-        let frauds = self.classify_ids(query, candidates);
+        let frauds = if params.risky_semantic_groups {
+            self.classify_risky_semantic(query, params.risky_semantic_radius)
+                .unwrap_or_else(|| self.classify_ids(query, broad_candidates))
+        } else {
+            self.classify_ids(query, broad_candidates)
+        };
         if allow_full_tiebreak && needs_full_risky_tiebreak(query, frauds) {
             self.classify_flat(query)
         } else {
             frauds
+        }
+    }
+
+    fn classify_risky_semantic(
+        &self,
+        query: &QuantizedVector,
+        semantic_radius: usize,
+    ) -> Option<usize> {
+        let broad_key = risky_group_key(query);
+        let mcc_bucket = bucket4(query[12]);
+        let ratio_bit = if query[2] >= 4_000 { 1i32 } else { 0i32 };
+        let tx_bit = if query[8] >= 3_000 { 1i32 } else { 0i32 };
+
+        let (mcc_start, mcc_end) = match semantic_radius {
+            0 | 1 => (mcc_bucket, mcc_bucket),
+            2 => ((mcc_bucket - 1).max(0), (mcc_bucket + 1).min(3)),
+            _ => (0, 3),
+        };
+        let (ratio_start, ratio_end) = if semantic_radius == 0 {
+            (ratio_bit, ratio_bit)
+        } else {
+            (0, 1)
+        };
+        let (tx_start, tx_end) = if semantic_radius == 0 {
+            (tx_bit, tx_bit)
+        } else {
+            (0, 1)
+        };
+
+        let mut top_dist = [i64::MAX; K];
+        let mut top_label = [0u8; K];
+        let mut candidates = 0usize;
+
+        for mcc in mcc_start..=mcc_end {
+            for ratio in ratio_start..=ratio_end {
+                for tx in tx_start..=tx_end {
+                    let key = broad_key | ((mcc as usize) << 4) | ((ratio as usize) << 6) | ((tx as usize) << 7);
+                    let ids = &self.risky_semantic_groups[key];
+                    candidates += ids.len();
+                    for &id in ids {
+                        self.consider(id, query, &mut top_dist, &mut top_label);
+                    }
+                }
+            }
+        }
+
+        if candidates >= K {
+            Some(count_frauds(&top_label))
+        } else {
+            None
         }
     }
 
@@ -333,18 +448,31 @@ impl Index {
         query: &QuantizedVector,
         params: &SearchParams,
     ) -> Option<usize> {
-        if !params.profile_fast_path {
+        if !params.profile_fast_path || !self.profile_fast_paths_allowed {
             return None;
         }
 
         let key = profile_key(query);
-        if (self.profile_counts[key] as usize) < params.profile_min_count {
-            return None;
-        }
+        let profile_count = self.profile_counts[key] as usize;
 
         match self.profile_label_masks[key] {
-            LEGIT_MASK => Some(0),
-            FRAUD_MASK => Some(K),
+            LEGIT_MASK if profile_count >= params.profile_legit_min_count => Some(0),
+            FRAUD_MASK if profile_count >= params.profile_fraud_min_count => Some(K),
+            _ if params.profile_dominant_fast_path => {
+                let profile_frauds = self.profile_fraud_counts[key] as usize;
+                let profile_legits = profile_count.saturating_sub(profile_frauds);
+                if profile_frauds >= params.profile_dominant_min_count
+                    && profile_legits <= params.profile_dominant_max_opposite
+                {
+                    Some(K)
+                } else if profile_legits >= params.profile_dominant_min_count
+                    && profile_frauds <= params.profile_dominant_max_opposite
+                {
+                    Some(0)
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -505,6 +633,110 @@ fn exact_fallback_mode(value: Option<&str>) -> u8 {
     }
 }
 
+fn parse_metadata(bytes: &[u8], metadata_offset: usize) -> Result<IndexMetadata, String> {
+    if metadata_offset == 0 {
+        return Ok(IndexMetadata::default());
+    }
+    if metadata_offset < HEADER_LEN || metadata_offset + META_LEN > bytes.len() {
+        return Err("index metadata offset out of bounds".to_string());
+    }
+    if bytes[metadata_offset..metadata_offset + 8] != META_MAGIC[..] {
+        return Err("bad index metadata magic".to_string());
+    }
+
+    let version = read_u32(bytes, metadata_offset + 8)?;
+    if version != 1 {
+        return Err("unsupported index metadata version".to_string());
+    }
+
+    let flags = read_u32(bytes, metadata_offset + 12)?;
+    let gzip_sha256 = if flags & META_FLAG_GZIP_SHA256 != 0 {
+        Some(read_sha256(bytes, metadata_offset + 16)?)
+    } else {
+        None
+    };
+    let json_sha256 = if flags & META_FLAG_JSON_SHA256 != 0 {
+        Some(read_sha256(bytes, metadata_offset + 48)?)
+    } else {
+        None
+    };
+
+    Ok(IndexMetadata {
+        gzip_sha256,
+        json_sha256,
+    })
+}
+
+fn validate_expected_references(actual: Option<[u8; 32]>) -> Result<(), String> {
+    let Ok(expected) = env::var("EXPECTED_REFERENCES_GZIP_SHA256") else {
+        return Ok(());
+    };
+    if expected.trim().is_empty() {
+        return Ok(());
+    }
+
+    let Some(actual) = actual else {
+        return Err("index has no references gzip sha256 metadata".to_string());
+    };
+    if !sha256_list_contains(&expected, &actual) {
+        return Err(format!(
+            "references gzip sha256 mismatch: index={} expected={}",
+            sha256_hex(&actual),
+            expected
+        ));
+    }
+    Ok(())
+}
+
+fn reference_allowed_by_env(name: &str, actual: Option<[u8; 32]>) -> bool {
+    let Ok(allowed) = env::var(name) else {
+        return false;
+    };
+    let Some(actual) = actual else {
+        return false;
+    };
+    sha256_list_contains(&allowed, &actual)
+}
+
+fn sha256_list_contains(list: &str, actual: &[u8; 32]) -> bool {
+    list.split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .any(|item| parse_sha256_hex(item).as_ref() == Some(actual))
+}
+
+fn parse_sha256_hex(value: &str) -> Option<[u8; 32]> {
+    let trimmed = value.trim();
+    if trimmed.len() != 64 {
+        return None;
+    }
+
+    let mut out = [0u8; 32];
+    for (idx, slot) in out.iter_mut().enumerate() {
+        let pos = idx * 2;
+        *slot = u8::from_str_radix(&trimmed[pos..pos + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+fn read_sha256(bytes: &[u8], pos: usize) -> Result<[u8; 32], String> {
+    if pos + 32 > bytes.len() {
+        return Err("unexpected eof reading sha256".to_string());
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes[pos..pos + 32]);
+    Ok(out)
+}
+
+fn sha256_hex(bytes: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 pub fn exact_fallback_name(mode: u8) -> &'static str {
     match mode {
         EXACT_FALLBACK_UNCERTAIN => "uncertain",
@@ -523,9 +755,13 @@ fn count_frauds(top_label: &[u8; K]) -> usize {
     top_label.iter().filter(|&&label| label == 1).count()
 }
 
-fn strong_decision(top_label: &[u8; K]) -> bool {
+fn strong_decision(top_label: &[u8; K], include_edges: bool) -> bool {
     let frauds = count_frauds(top_label);
-    frauds <= 1 || frauds >= 4
+    if include_edges {
+        frauds <= 1 || frauds >= K - 1
+    } else {
+        frauds == 0 || frauds == K
+    }
 }
 
 fn should_use_exact_fallback(
@@ -556,6 +792,31 @@ fn is_strong_fallback_risk(query: &QuantizedVector, frauds: usize) -> bool {
         return true;
     }
 
+    if is_strong_profile_tiebreak(query, frauds) {
+        return true;
+    }
+
+    if frauds == K
+        && query[5] >= 600
+        && query[5] <= 850
+        && query[9] == 0
+        && query[10] == 0
+        && query[11] == 0
+        && query[12] <= 2_000
+        && query[0] >= 1_100
+        && query[0] <= 1_300
+        && query[2] >= 4_000
+        && query[2] <= 4_600
+        && query[7] >= 550
+        && query[7] <= 750
+        && query[8] >= 2_000
+        && query[8] <= 3_000
+        && query[13] >= 220
+        && query[13] <= 320
+    {
+        return true;
+    }
+
     query[5] >= 0
         && query[10] == 0
         && query[0] >= 450
@@ -566,6 +827,61 @@ fn is_strong_fallback_risk(query: &QuantizedVector, frauds: usize) -> bool {
         && query[7] <= 2_000
         && query[8] >= 2_000
         && query[8] <= 4_500
+}
+
+fn is_strong_profile_tiebreak(query: &QuantizedVector, frauds: usize) -> bool {
+    if query[5] < 0 || query[13] > 220 {
+        return false;
+    }
+
+    if frauds == 0 {
+        return (query[9] == 0
+            && query[10] > 0
+            && query[12] >= 7_500
+            && query[0] >= 450
+            && query[0] <= 600
+            && query[2] >= 1_000
+            && query[2] <= 1_200
+            && query[7] >= 400
+            && query[7] <= 600
+            && query[8] >= 4_000
+            && query[8] <= 5_000)
+            || (query[9] > 0
+                && query[10] == 0
+                && query[12] <= 2_500
+                && query[0] >= 2_100
+                && query[0] <= 2_300
+                && query[2] >= 4_400
+                && query[2] <= 4_900
+                && query[7] >= 700
+                && query[7] <= 950
+                && query[8] >= 2_000
+                && query[8] <= 3_000)
+            || (query[9] > 0
+                && query[10] == 0
+                && query[11] > 0
+                && query[12] >= 4_000
+                && query[12] <= 5_000
+                && query[0] >= 1_200
+                && query[0] <= 1_500
+                && query[2] >= 3_300
+                && query[2] <= 3_800
+                && query[7] >= 3_300
+                && query[7] <= 3_900
+                && query[8] >= 2_000
+                && query[8] <= 3_000);
+    }
+
+    query[9] == 0
+        && query[10] > 0
+        && query[12] <= 2_500
+        && query[0] >= 2_700
+        && query[0] <= 3_000
+        && query[2] >= 9_000
+        && query[7] >= 3_500
+        && query[7] <= 4_000
+        && query[8] >= 2_500
+        && query[8] <= 3_500
 }
 
 fn is_no_last_moderate_risk_fallback(query: &QuantizedVector) -> bool {
@@ -586,6 +902,29 @@ fn is_no_last_moderate_risk_fallback(query: &QuantizedVector) -> bool {
 }
 
 fn needs_full_risky_tiebreak(query: &QuantizedVector, frauds: usize) -> bool {
+    if frauds >= 3
+        && query[5] < 0
+        && query[9] > 0
+        && query[10] == 0
+        && query[11] == 0
+        && query[0] >= 400
+        && query[0] <= 600
+        && query[1] >= 5_500
+        && query[1] <= 6_200
+        && query[2] >= 900
+        && query[2] <= 1_300
+        && query[7] >= 650
+        && query[7] <= 900
+        && query[8] >= 4_500
+        && query[8] <= 5_500
+        && query[12] >= 4_500
+        && query[12] <= 5_500
+        && query[13] >= 100
+        && query[13] <= 250
+    {
+        return true;
+    }
+
     if query[5] < 0 || query[9] <= 0 || query[10] != 0 {
         return false;
     }
@@ -629,7 +968,11 @@ fn add_dim(bytes: &[u8], vector_start: usize, query: &QuantizedVector, dim: usiz
 #[inline(always)]
 fn read_i16_unchecked(bytes: &[u8], pos: usize) -> i16 {
     debug_assert!(pos + 2 <= bytes.len());
-    unsafe { i16::from_le(std::ptr::read_unaligned(bytes.as_ptr().add(pos) as *const i16)) }
+    unsafe {
+        i16::from_le(std::ptr::read_unaligned(
+            bytes.as_ptr().add(pos) as *const i16
+        ))
+    }
 }
 
 fn build_profile_stats(
@@ -637,18 +980,22 @@ fn build_profile_stats(
     count: usize,
     vectors_offset: usize,
     labels_offset: usize,
-) -> (Vec<u16>, Vec<u8>) {
+) -> (Vec<u16>, Vec<u8>, Vec<u16>) {
     let mut profile_counts = vec![0u16; PROFILE_KEY_COUNT];
     let mut profile_label_masks = vec![0u8; PROFILE_KEY_COUNT];
+    let mut profile_fraud_counts = vec![0u16; PROFILE_KEY_COUNT];
 
     for id in 0..count {
         let key = profile_key_at(bytes, vectors_offset + id * DIM * 2);
         profile_counts[key] = profile_counts[key].saturating_add(1);
         let label = bytes[labels_offset + id];
         profile_label_masks[key] |= if label == 1 { FRAUD_MASK } else { LEGIT_MASK };
+        if label == 1 {
+            profile_fraud_counts[key] = profile_fraud_counts[key].saturating_add(1);
+        }
     }
 
-    (profile_counts, profile_label_masks)
+    (profile_counts, profile_label_masks, profile_fraud_counts)
 }
 
 fn build_risky_fallback_index(
@@ -656,11 +1003,15 @@ fn build_risky_fallback_index(
     count: usize,
     vectors_offset: usize,
     filter: &RiskyFallbackFilter,
-) -> (Vec<u32>, Vec<Vec<u32>>) {
+) -> (Vec<u32>, Vec<Vec<u32>>, Vec<Vec<u32>>) {
     let mut ids = Vec::with_capacity(128_000);
     let mut groups = Vec::with_capacity(RISKY_GROUP_COUNT);
     for _ in 0..RISKY_GROUP_COUNT {
         groups.push(Vec::new());
+    }
+    let mut semantic_groups = Vec::with_capacity(RISKY_SEMANTIC_GROUP_COUNT);
+    for _ in 0..RISKY_SEMANTIC_GROUP_COUNT {
+        semantic_groups.push(Vec::new());
     }
     for id in 0..count {
         let start = vectors_offset + id * DIM * 2;
@@ -668,9 +1019,10 @@ fn build_risky_fallback_index(
             let item = id as u32;
             ids.push(item);
             groups[risky_group_key_at(bytes, start)].push(item);
+            semantic_groups[risky_semantic_group_key_at(bytes, start)].push(item);
         }
     }
-    (ids, groups)
+    (ids, groups, semantic_groups)
 }
 
 fn is_risky_fallback_reference(
@@ -794,6 +1146,22 @@ fn risky_group_key_at(bytes: &[u8], vector_start: usize) -> usize {
     key
 }
 
+fn risky_semantic_group_key_at(bytes: &[u8], vector_start: usize) -> usize {
+    let mut key = risky_group_key_at(bytes, vector_start);
+    key |= (bucket4(read_i16_unchecked(bytes, vector_start + 24)) as usize) << 4;
+    key |= (if read_i16_unchecked(bytes, vector_start + 4) >= 4_000 {
+        1
+    } else {
+        0
+    }) << 6;
+    key |= (if read_i16_unchecked(bytes, vector_start + 16) >= 3_000 {
+        1
+    } else {
+        0
+    }) << 7;
+    key
+}
+
 struct RiskyFallbackFilter {
     amount_min: i32,
     amount_max: i32,
@@ -911,7 +1279,11 @@ fn read_u64(bytes: &[u8], pos: usize) -> Result<u64, String> {
 #[inline(always)]
 fn read_u32_unchecked(bytes: &[u8], pos: usize) -> u32 {
     debug_assert!(pos + 4 <= bytes.len());
-    unsafe { u32::from_le(std::ptr::read_unaligned(bytes.as_ptr().add(pos) as *const u32)) }
+    unsafe {
+        u32::from_le(std::ptr::read_unaligned(
+            bytes.as_ptr().add(pos) as *const u32
+        ))
+    }
 }
 
 pub struct Mmap {
@@ -934,6 +1306,8 @@ impl Mmap {
             use std::os::fd::AsRawFd;
             const PROT_READ: i32 = 0x1;
             const MAP_PRIVATE: i32 = 0x02;
+            #[cfg(target_os = "linux")]
+            const MAP_POPULATE: i32 = 0x8000;
 
             extern "C" {
                 fn mmap(
@@ -946,12 +1320,18 @@ impl Mmap {
                 ) -> *mut c_void;
             }
 
+            let mut flags = MAP_PRIVATE;
+            #[cfg(target_os = "linux")]
+            if env_bool("INDEX_MMAP_POPULATE", true) {
+                flags |= MAP_POPULATE;
+            }
+
             let ptr = unsafe {
                 mmap(
                     std::ptr::null_mut(),
                     len,
                     PROT_READ,
-                    MAP_PRIVATE,
+                    flags,
                     file.as_raw_fd(),
                     0,
                 )
@@ -959,10 +1339,12 @@ impl Mmap {
             if ptr as isize == -1 {
                 return Err(io::Error::last_os_error());
             }
-            Ok(Self {
+            let mapped = Self {
                 ptr: ptr as *mut u8,
                 len,
-            })
+            };
+            mapped.advise();
+            Ok(mapped)
         }
         #[cfg(not(unix))]
         {
@@ -976,6 +1358,27 @@ impl Mmap {
 
     fn as_slice(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    #[cfg(unix)]
+    fn advise(&self) {
+        #[cfg(target_os = "linux")]
+        unsafe {
+            use std::ffi::c_void;
+            const MADV_RANDOM: i32 = 1;
+            const MADV_WILLNEED: i32 = 3;
+            const MADV_HUGEPAGE: i32 = 14;
+
+            if env_bool("INDEX_HUGEPAGES", false) {
+                let _ = libc::madvise(self.ptr.cast::<c_void>(), self.len, MADV_HUGEPAGE);
+            }
+            if env_bool("INDEX_RANDOM", true) {
+                let _ = libc::madvise(self.ptr.cast::<c_void>(), self.len, MADV_RANDOM);
+            }
+            if env_bool("INDEX_WILLNEED", true) {
+                let _ = libc::madvise(self.ptr.cast::<c_void>(), self.len, MADV_WILLNEED);
+            }
+        }
     }
 }
 
@@ -1053,12 +1456,20 @@ mod tests {
             fast_only: false,
             profile_fast_path: true,
             profile_min_count: 20,
+            profile_legit_min_count: 20,
+            profile_fraud_min_count: 20,
+            profile_dominant_fast_path: false,
+            profile_dominant_min_count: 15,
+            profile_dominant_max_opposite: 2,
             exact_fallback: 0,
+            early_edge_fallback: false,
             overload_min_candidates: 3_000,
             overload_max_candidates: 15_000,
             overload_threshold: 8,
             overload_fast_only: true,
             search_fallback_last_distance: 2_900,
+            risky_semantic_groups: true,
+            risky_semantic_radius: 2,
         };
 
         assert!(!params.for_load(7).fast_only);

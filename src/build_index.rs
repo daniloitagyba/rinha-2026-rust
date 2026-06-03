@@ -1,11 +1,17 @@
 use crate::vector::{bucket_key, quantize_reference, QuantizedVector, BUCKET_COUNT, DIM, SCALE};
+use sha2::{Digest, Sha256};
+use std::env;
 use std::fs::{create_dir_all, File};
 use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 const MAGIC: &[u8; 8] = b"RINHA26I";
+const META_MAGIC: &[u8; 8] = b"R26META1";
 const VERSION: u32 = 1;
 const HEADER_LEN: usize = 80;
+const META_VERSION: u32 = 1;
+const META_FLAG_GZIP_SHA256: u32 = 1;
+const META_FLAG_JSON_SHA256: u32 = 2;
 
 pub fn run(output: &str) -> Result<(), String> {
     if let Some(parent) = Path::new(output).parent() {
@@ -94,6 +100,13 @@ pub fn run(output: &str) -> Result<(), String> {
             .map_err(|e| format!("failed to write bucket items: {e}"))?;
     }
 
+    let metadata_offset = file.stream_position().map_err(|e| e.to_string())?;
+    let gzip_sha256 = env::var("REFERENCES_GZIP_SHA256")
+        .ok()
+        .and_then(|value| parse_sha256_hex(&value));
+    let json_sha256 = scanner.content_sha256();
+    write_metadata(&mut file, gzip_sha256, json_sha256)?;
+
     let file_len = file.stream_position().map_err(|e| e.to_string())?;
     file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     write_header(
@@ -103,14 +116,16 @@ pub fn run(output: &str) -> Result<(), String> {
         labels_offset,
         bucket_offsets_offset,
         bucket_items_offset,
+        metadata_offset,
         file_len,
     )?;
     eprintln!(
-        "indexed {} vectors into {} ({} clustered buckets, {} bytes)",
+        "indexed {} vectors into {} ({} clustered buckets, {} bytes, references_json_sha256={})",
         labels.len(),
         output,
         BUCKET_COUNT,
-        file_len
+        file_len,
+        sha256_hex(&json_sha256)
     );
     Ok(())
 }
@@ -122,6 +137,7 @@ fn write_header(
     labels_offset: u64,
     bucket_offsets_offset: u64,
     bucket_items_offset: u64,
+    metadata_offset: u64,
     file_len: u64,
 ) -> Result<(), String> {
     file.write_all(MAGIC).map_err(|e| e.to_string())?;
@@ -136,7 +152,27 @@ fn write_header(
     write_u64(file, bucket_offsets_offset)?;
     write_u64(file, bucket_items_offset)?;
     write_u64(file, file_len)?;
-    write_u64(file, 0)?;
+    write_u64(file, metadata_offset)?;
+    Ok(())
+}
+
+fn write_metadata(
+    file: &mut File,
+    gzip_sha256: Option<[u8; 32]>,
+    json_sha256: [u8; 32],
+) -> Result<(), String> {
+    file.write_all(META_MAGIC)
+        .map_err(|e| format!("failed to write metadata: {e}"))?;
+    write_u32(file, META_VERSION)?;
+    let mut flags = META_FLAG_JSON_SHA256;
+    if gzip_sha256.is_some() {
+        flags |= META_FLAG_GZIP_SHA256;
+    }
+    write_u32(file, flags)?;
+    file.write_all(&gzip_sha256.unwrap_or([0u8; 32]))
+        .map_err(|e| format!("failed to write metadata: {e}"))?;
+    file.write_all(&json_sha256)
+        .map_err(|e| format!("failed to write metadata: {e}"))?;
     Ok(())
 }
 
@@ -153,6 +189,7 @@ fn write_u64(file: &mut File, value: u64) -> Result<(), String> {
 struct JsonScanner<R: Read> {
     reader: BufReader<R>,
     pushed: Option<u8>,
+    hasher: Sha256,
 }
 
 impl<R: Read> JsonScanner<R> {
@@ -160,6 +197,7 @@ impl<R: Read> JsonScanner<R> {
         Self {
             reader: BufReader::with_capacity(64 * 1024, reader),
             pushed: None,
+            hasher: Sha256::new(),
         }
     }
 
@@ -296,11 +334,41 @@ impl<R: Read> JsonScanner<R> {
         let mut byte = [0u8; 1];
         match self.reader.read(&mut byte)? {
             0 => Ok(None),
-            _ => Ok(Some(byte[0])),
+            _ => {
+                self.hasher.update(byte);
+                Ok(Some(byte[0]))
+            }
         }
     }
 
     fn push(&mut self, byte: u8) {
         self.pushed = Some(byte);
     }
+
+    fn content_sha256(self) -> [u8; 32] {
+        self.hasher.finalize().into()
+    }
+}
+
+fn parse_sha256_hex(value: &str) -> Option<[u8; 32]> {
+    let trimmed = value.trim();
+    if trimmed.len() != 64 {
+        return None;
+    }
+
+    let mut out = [0u8; 32];
+    for (idx, slot) in out.iter_mut().enumerate() {
+        let pos = idx * 2;
+        *slot = u8::from_str_radix(&trimmed[pos..pos + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+fn sha256_hex(bytes: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }

@@ -1,64 +1,64 @@
 pub struct Payload<'a> {
     pub amount: f64,
     pub installments: f64,
-    pub requested_at: &'a str,
+    pub requested_at: &'a [u8],
     pub customer_avg_amount: f64,
     pub tx_count_24h: f64,
-    pub known_merchants: &'a str,
-    pub merchant_id: &'a str,
-    pub mcc: &'a str,
+    pub known_merchants: &'a [u8],
+    pub merchant_id: &'a [u8],
+    pub mcc: &'a [u8],
     pub merchant_avg_amount: f64,
     pub is_online: bool,
     pub card_present: bool,
     pub km_from_home: f64,
-    pub last_timestamp: Option<&'a str>,
+    pub last_timestamp: Option<&'a [u8]>,
     pub last_km_from_current: Option<f64>,
 }
 
-pub fn parse_payload(body: &str) -> Result<Payload<'_>, &'static str> {
-    let transaction = object_slice(body, "\"transaction\"").ok_or("missing transaction")?;
-    let customer = object_slice(body, "\"customer\"").ok_or("missing customer")?;
-    let merchant = object_slice(body, "\"merchant\"").ok_or("missing merchant")?;
-    let terminal = object_slice(body, "\"terminal\"").ok_or("missing terminal")?;
+pub fn parse_payload(body: &[u8]) -> Result<Payload<'_>, &'static str> {
+    let transaction = object_slice(body, b"\"transaction\"").ok_or("missing transaction")?;
+    let customer = object_slice(body, b"\"customer\"").ok_or("missing customer")?;
+    let merchant = object_slice(body, b"\"merchant\"").ok_or("missing merchant")?;
+    let terminal = object_slice(body, b"\"terminal\"").ok_or("missing terminal")?;
 
-    let last_pos = after_colon(body, "\"last_transaction\"").ok_or("missing last_transaction")?;
+    let last_pos = after_colon(body, b"\"last_transaction\"").ok_or("missing last_transaction")?;
     let last_pos = skip_ws(body, last_pos);
-    let (last_timestamp, last_km_from_current) = if body[last_pos..].starts_with("null") {
+    let (last_timestamp, last_km_from_current) = if body[last_pos..].starts_with(b"null") {
         (None, None)
     } else {
-        let last = object_slice(body, "\"last_transaction\"").ok_or("bad last_transaction")?;
+        let last = object_slice(body, b"\"last_transaction\"").ok_or("bad last_transaction")?;
         (
-            Some(string_field(last, "\"timestamp\"").ok_or("missing last timestamp")?),
-            Some(number_field(last, "\"km_from_current\"").ok_or("missing last km")?),
+            Some(string_field(last, b"\"timestamp\"").ok_or("missing last timestamp")?),
+            Some(number_field(last, b"\"km_from_current\"").ok_or("missing last km")?),
         )
     };
 
     Ok(Payload {
-        amount: number_field(transaction, "\"amount\"").ok_or("missing amount")?,
-        installments: number_field(transaction, "\"installments\"")
+        amount: number_field(transaction, b"\"amount\"").ok_or("missing amount")?,
+        installments: number_field(transaction, b"\"installments\"")
             .ok_or("missing installments")?,
-        requested_at: string_field(transaction, "\"requested_at\"")
+        requested_at: string_field(transaction, b"\"requested_at\"")
             .ok_or("missing requested_at")?,
-        customer_avg_amount: number_field(customer, "\"avg_amount\"")
+        customer_avg_amount: number_field(customer, b"\"avg_amount\"")
             .ok_or("missing customer avg")?,
-        tx_count_24h: number_field(customer, "\"tx_count_24h\"").ok_or("missing tx_count_24h")?,
-        known_merchants: array_slice(customer, "\"known_merchants\"")
+        tx_count_24h: number_field(customer, b"\"tx_count_24h\"").ok_or("missing tx_count_24h")?,
+        known_merchants: array_slice(customer, b"\"known_merchants\"")
             .ok_or("missing known_merchants")?,
-        merchant_id: string_field(merchant, "\"id\"").ok_or("missing merchant id")?,
-        mcc: string_field(merchant, "\"mcc\"").ok_or("missing mcc")?,
-        merchant_avg_amount: number_field(merchant, "\"avg_amount\"")
+        merchant_id: string_field(merchant, b"\"id\"").ok_or("missing merchant id")?,
+        mcc: string_field(merchant, b"\"mcc\"").ok_or("missing mcc")?,
+        merchant_avg_amount: number_field(merchant, b"\"avg_amount\"")
             .ok_or("missing merchant avg")?,
-        is_online: bool_field(terminal, "\"is_online\"").ok_or("missing is_online")?,
-        card_present: bool_field(terminal, "\"card_present\"").ok_or("missing card_present")?,
-        km_from_home: number_field(terminal, "\"km_from_home\"").ok_or("missing km_from_home")?,
+        is_online: bool_field(terminal, b"\"is_online\"").ok_or("missing is_online")?,
+        card_present: bool_field(terminal, b"\"card_present\"").ok_or("missing card_present")?,
+        km_from_home: number_field(terminal, b"\"km_from_home\"").ok_or("missing km_from_home")?,
         last_timestamp,
         last_km_from_current,
     })
 }
 
-fn object_slice<'a>(s: &'a str, key: &str) -> Option<&'a str> {
+fn object_slice<'a>(s: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
     let mut pos = skip_ws(s, after_colon(s, key)?);
-    if s.as_bytes().get(pos) != Some(&b'{') {
+    if s.get(pos) != Some(&b'{') {
         return None;
     }
     let start = pos;
@@ -67,7 +67,7 @@ fn object_slice<'a>(s: &'a str, key: &str) -> Option<&'a str> {
     let mut escaped = false;
 
     while pos < s.len() {
-        let b = s.as_bytes()[pos];
+        let b = s[pos];
         if in_string {
             if escaped {
                 escaped = false;
@@ -91,9 +91,9 @@ fn object_slice<'a>(s: &'a str, key: &str) -> Option<&'a str> {
     None
 }
 
-fn array_slice<'a>(s: &'a str, key: &str) -> Option<&'a str> {
+fn array_slice<'a>(s: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
     let mut pos = skip_ws(s, after_colon(s, key)?);
-    if s.as_bytes().get(pos) != Some(&b'[') {
+    if s.get(pos) != Some(&b'[') {
         return None;
     }
     let start = pos;
@@ -102,7 +102,7 @@ fn array_slice<'a>(s: &'a str, key: &str) -> Option<&'a str> {
     let mut escaped = false;
 
     while pos < s.len() {
-        let b = s.as_bytes()[pos];
+        let b = s[pos];
         if in_string {
             if escaped {
                 escaped = false;
@@ -126,19 +126,18 @@ fn array_slice<'a>(s: &'a str, key: &str) -> Option<&'a str> {
     None
 }
 
-fn number_field(s: &str, key: &str) -> Option<f64> {
+fn number_field(s: &[u8], key: &[u8]) -> Option<f64> {
     let mut pos = skip_ws(s, after_colon(s, key)?);
     let start = pos;
-    let bytes = s.as_bytes();
     while pos < s.len() {
-        let b = bytes[pos];
+        let b = s[pos];
         if b.is_ascii_digit() || matches!(b, b'-' | b'+' | b'.' | b'e' | b'E') {
             pos += 1;
         } else {
             break;
         }
     }
-    parse_number(&bytes[start..pos])
+    parse_number(&s[start..pos])
 }
 
 fn parse_number(bytes: &[u8]) -> Option<f64> {
@@ -209,16 +208,16 @@ fn parse_number(bytes: &[u8]) -> Option<f64> {
     Some(if negative { -value } else { value })
 }
 
-fn string_field<'a>(s: &'a str, key: &str) -> Option<&'a str> {
+fn string_field<'a>(s: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
     let mut pos = skip_ws(s, after_colon(s, key)?);
-    if s.as_bytes().get(pos) != Some(&b'"') {
+    if s.get(pos) != Some(&b'"') {
         return None;
     }
     pos += 1;
     let start = pos;
     let mut escaped = false;
     while pos < s.len() {
-        let b = s.as_bytes()[pos];
+        let b = s[pos];
         if escaped {
             escaped = false;
         } else if b == b'\\' {
@@ -231,22 +230,22 @@ fn string_field<'a>(s: &'a str, key: &str) -> Option<&'a str> {
     None
 }
 
-fn bool_field(s: &str, key: &str) -> Option<bool> {
+fn bool_field(s: &[u8], key: &[u8]) -> Option<bool> {
     let pos = skip_ws(s, after_colon(s, key)?);
-    if s[pos..].starts_with("true") {
+    if s[pos..].starts_with(b"true") {
         Some(true)
-    } else if s[pos..].starts_with("false") {
+    } else if s[pos..].starts_with(b"false") {
         Some(false)
     } else {
         None
     }
 }
 
-fn after_colon(s: &str, key: &str) -> Option<usize> {
-    let key_pos = s.find(key)?;
+fn after_colon(s: &[u8], key: &[u8]) -> Option<usize> {
+    let key_pos = find_bytes(s, key)?;
     let mut pos = key_pos + key.len();
     while pos < s.len() {
-        let b = s.as_bytes()[pos];
+        let b = s[pos];
         if b == b':' {
             return Some(pos + 1);
         }
@@ -258,9 +257,18 @@ fn after_colon(s: &str, key: &str) -> Option<usize> {
     None
 }
 
-fn skip_ws(s: &str, mut pos: usize) -> usize {
-    while pos < s.len() && s.as_bytes()[pos].is_ascii_whitespace() {
+fn skip_ws(s: &[u8], mut pos: usize) -> usize {
+    while pos < s.len() && s[pos].is_ascii_whitespace() {
         pos += 1;
     }
     pos
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }

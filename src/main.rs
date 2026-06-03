@@ -1,8 +1,12 @@
 mod build_index;
 mod eval;
+#[cfg(unix)]
+mod fdpass;
 mod http;
 mod index;
 mod parser;
+#[cfg(unix)]
+mod raw_server;
 mod vector;
 
 use std::env;

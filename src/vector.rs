@@ -28,20 +28,17 @@ pub fn vectorize(payload: &Payload<'_>) -> QuantizedVector {
     vectorize_input(VectorInput {
         amount: payload.amount,
         installments: payload.installments,
-        requested_at: payload.requested_at.as_bytes(),
+        requested_at: payload.requested_at,
         customer_avg_amount: payload.customer_avg_amount,
         tx_count_24h: payload.tx_count_24h,
-        known_merchant: contains_quoted_bytes(
-            payload.known_merchants.as_bytes(),
-            payload.merchant_id.as_bytes(),
-        ),
-        mcc: payload.mcc.as_bytes(),
+        known_merchant: contains_quoted_bytes(payload.known_merchants, payload.merchant_id),
+        mcc: payload.mcc,
         merchant_avg_amount: payload.merchant_avg_amount,
         is_online: payload.is_online,
         card_present: payload.card_present,
         km_from_home: payload.km_from_home,
         has_last_transaction: payload.last_timestamp.is_some(),
-        last_timestamp: payload.last_timestamp.map(str::as_bytes).unwrap_or(&[]),
+        last_timestamp: payload.last_timestamp.unwrap_or(&[]),
         last_km_from_current: payload.last_km_from_current.unwrap_or(0.0),
     })
 }
@@ -77,11 +74,7 @@ pub fn vectorize_input(input: VectorInput<'_>) -> QuantizedVector {
     out[7] = q(clamp01(input.km_from_home / 1000.0));
     out[8] = q(clamp01(input.tx_count_24h / 20.0));
     out[9] = if input.is_online { SCALE as i16 } else { 0 };
-    out[10] = if input.card_present {
-        SCALE as i16
-    } else {
-        0
-    };
+    out[10] = if input.card_present { SCALE as i16 } else { 0 };
     out[11] = if input.known_merchant {
         0
     } else {
@@ -321,7 +314,7 @@ mod tests {
     #[test]
     fn vectorizes_payload_without_last_transaction() {
         let payload =
-            parse_payload(include_str!("../resources/example-payload-legit.json")).unwrap();
+            parse_payload(include_bytes!("../resources/example-payload-legit.json")).unwrap();
         let vector = vectorize(&payload);
 
         assert_eq!(vector[0], 41);
@@ -340,7 +333,7 @@ mod tests {
     #[test]
     fn vectorizes_unknown_merchant_and_high_risk_mcc() {
         let payload =
-            parse_payload(include_str!("../resources/example-payload-fraud.json")).unwrap();
+            parse_payload(include_bytes!("../resources/example-payload-fraud.json")).unwrap();
         let vector = vectorize(&payload);
 
         assert_eq!(vector[0], 9506);

@@ -47,7 +47,7 @@ pub fn run(input: &str) -> Result<(), String> {
             .ok_or_else(|| "bad expected_approved".to_string())?;
 
         let item_started = Instant::now();
-        match parse_payload(&data[request_start..=request_end]) {
+        match parse_payload(data[request_start..=request_end].as_bytes()) {
             Ok(payload) => {
                 let query = vectorize(&payload);
                 let (approved, score, kind) = index.classify_detailed(&query, &params);
@@ -67,13 +67,13 @@ pub fn run(input: &str) -> Result<(), String> {
                 if let Some(writer) = dump_writer.as_mut() {
                     write_eval_row(
                         writer,
-                            expected,
-                            approved,
-                            fraud_count,
-                            kind,
-                            Some(&query),
-                            None,
-                        )?;
+                        expected,
+                        approved,
+                        fraud_count,
+                        kind,
+                        Some(&query),
+                        None,
+                    )?;
                 }
 
                 if approved != expected {
@@ -129,15 +129,39 @@ pub fn run(input: &str) -> Result<(), String> {
     let score_det = detection_score(weighted_errors, failure_rate, epsilon);
 
     println!("index={index_path}");
+    println!(
+        "references_gzip_sha256={}",
+        index
+            .references_gzip_sha256_hex()
+            .unwrap_or_else(|| "none".to_string())
+    );
+    println!(
+        "references_json_sha256={}",
+        index
+            .references_json_sha256_hex()
+            .unwrap_or_else(|| "none".to_string())
+    );
+    println!(
+        "profile_fastpaths_allowed={}",
+        index.profile_fast_paths_allowed()
+    );
     println!("risky_fallback_refs={}", index.risky_fallback_count());
     println!(
-        "params early_candidates={} min_candidates={} max_candidates={} profile_fastpath={} profile_min_count={} exact_fallback={} overload_min_candidates={} overload_max_candidates={} overload_threshold={} overload_fast_only={} search_fallback_last_distance={} flat={} fast_path={} fast_only={}",
+        "params early_candidates={} min_candidates={} max_candidates={} profile_fastpath={} profile_min_count={} profile_legit_min_count={} profile_fraud_min_count={} profile_dominant_fastpath={} profile_dominant_min_count={} profile_dominant_max_opposite={} early_edge_fallback={} exact_fallback={} risky_semantic_groups={} risky_semantic_radius={} overload_min_candidates={} overload_max_candidates={} overload_threshold={} overload_fast_only={} search_fallback_last_distance={} flat={} fast_path={} fast_only={}",
         params.early_candidates,
         params.min_candidates,
         params.max_candidates,
         params.profile_fast_path,
         params.profile_min_count,
+        params.profile_legit_min_count,
+        params.profile_fraud_min_count,
+        params.profile_dominant_fast_path,
+        params.profile_dominant_min_count,
+        params.profile_dominant_max_opposite,
+        params.early_edge_fallback,
         exact_fallback_name(params.exact_fallback),
+        params.risky_semantic_groups,
+        params.risky_semantic_radius,
         params.overload_min_candidates,
         params.overload_max_candidates,
         params.overload_threshold,

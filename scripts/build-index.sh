@@ -13,6 +13,9 @@ fi
 mkdir -p "$(dirname "$OUTPUT")"
 
 case "$INPUT" in
-  *.gz) gzip -dc "$INPUT" | "$BIN" build-index "$OUTPUT" ;;
+  *.gz)
+    refs_sha="$(sha256sum "$INPUT" | awk '{print $1}')"
+    gzip -dc "$INPUT" | REFERENCES_GZIP_SHA256="$refs_sha" "$BIN" build-index "$OUTPUT"
+    ;;
   *) "$BIN" build-index "$OUTPUT" < "$INPUT" ;;
 esac

@@ -1,3 +1,5 @@
+#[cfg(unix)]
+use crate::fdpass;
 use crate::index::{exact_fallback_name, Index, SearchParams};
 use crate::parser::parse_payload;
 use crate::vector::vectorize;
@@ -6,7 +8,13 @@ use std::env;
 use std::fs;
 use std::io;
 #[cfg(unix)]
+use std::net::TcpStream as StdTcpStream;
+#[cfg(unix)]
+use std::os::fd::FromRawFd;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
 #[cfg(unix)]
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,10 +23,10 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::UnixListener;
-use tokio::runtime::Builder;
+use tokio::runtime::{Builder, Handle};
 
 const MAX_REQUEST_BYTES: usize = 32 * 1024;
-const RX_CAP: usize = 64 * 1024;
+pub(crate) const RX_CAP: usize = 64 * 1024;
 const MAX_BATCHED_RESPONSES: usize = 16;
 
 const RESP_APPROVED_0: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 35\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}";
@@ -27,17 +35,22 @@ const RESP_APPROVED_04: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/j
 const RESP_REJECTED_06: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}";
 const RESP_REJECTED_08: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}";
 const RESP_REJECTED_1: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 36\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}";
-const RESP_READY: &[u8] =
+pub(crate) const RESP_READY: &[u8] =
     b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nOK";
-const RESP_NOT_FOUND: &[u8] = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-const RESP_BAD_REQUEST: &[u8] =
+pub(crate) const RESP_NOT_FOUND: &[u8] =
+    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+pub(crate) const RESP_BAD_REQUEST: &[u8] =
     b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
-enum ParsedRequest {
+pub(crate) enum ParsedRequest {
     Incomplete,
     Bad,
-    Ready { consumed: usize },
-    NotFound { consumed: usize },
+    Ready {
+        consumed: usize,
+    },
+    NotFound {
+        consumed: usize,
+    },
     Fraud {
         body_start: usize,
         body_end: usize,
@@ -51,6 +64,8 @@ pub fn serve() -> Result<(), String> {
         env::var("INDEX_PATH").unwrap_or_else(|_| "/app/data/references.idx".to_string());
     let workers = env_usize("WORKERS", 4).max(1);
     let keep_alive_requests = env_usize("KEEP_ALIVE_REQUESTS", 256).max(1);
+    let fd_epoll_raw = env_bool("FD_EPOLL_RAW", true);
+    let fd_control_path = parse_fd_control_path(&bind_addr).map(str::to_owned);
     let unix_socket_path = parse_unix_socket_path(&bind_addr).map(str::to_owned);
     let params = Arc::new(SearchParams::from_env());
     let index = Arc::new(Index::open(&index_path)?);
@@ -61,14 +76,29 @@ pub fn serve() -> Result<(), String> {
     let load = Arc::new(AtomicUsize::new(0));
 
     eprintln!(
-        "serving on {bind_addr}, index={index_path}, workers={workers}, keep_alive_requests={keep_alive_requests}, accept=manual-http1, early_candidates={}, min_candidates={}, max_candidates={}, profile_fastpath={}, profile_min_count={}, exact_fallback={}, risky_fallback_refs={}, overload_min_candidates={}, overload_max_candidates={}, overload_threshold={}, overload_fast_only={}, search_fallback_last_distance={}, flat={}, fast_path={}, fast_only={}",
+        "serving on {bind_addr}, index={index_path}, references_gzip_sha256={}, references_json_sha256={}, profile_fastpaths_allowed={}, workers={workers}, keep_alive_requests={keep_alive_requests}, accept=manual-http1, fd_epoll_raw={fd_epoll_raw}, early_candidates={}, min_candidates={}, max_candidates={}, profile_fastpath={}, profile_min_count={}, profile_legit_min_count={}, profile_fraud_min_count={}, profile_dominant_fastpath={}, profile_dominant_min_count={}, profile_dominant_max_opposite={}, early_edge_fallback={}, exact_fallback={}, risky_fallback_refs={}, risky_semantic_groups={}, risky_semantic_radius={}, overload_min_candidates={}, overload_max_candidates={}, overload_threshold={}, overload_fast_only={}, search_fallback_last_distance={}, flat={}, fast_path={}, fast_only={}",
+        index
+            .references_gzip_sha256_hex()
+            .unwrap_or_else(|| "none".to_string()),
+        index
+            .references_json_sha256_hex()
+            .unwrap_or_else(|| "none".to_string()),
+        index.profile_fast_paths_allowed(),
         params.early_candidates,
         params.min_candidates,
         params.max_candidates,
         params.profile_fast_path,
         params.profile_min_count,
+        params.profile_legit_min_count,
+        params.profile_fraud_min_count,
+        params.profile_dominant_fast_path,
+        params.profile_dominant_min_count,
+        params.profile_dominant_max_opposite,
+        params.early_edge_fallback,
         exact_fallback_name(params.exact_fallback),
         index.risky_fallback_count(),
+        params.risky_semantic_groups,
+        params.risky_semantic_radius,
         params.overload_min_candidates,
         params.overload_max_candidates,
         params.overload_threshold,
@@ -79,6 +109,19 @@ pub fn serve() -> Result<(), String> {
         params.fast_only
     );
 
+    #[cfg(unix)]
+    if let Some(fd_control_path) = fd_control_path.as_deref() {
+        if fd_epoll_raw {
+            return crate::raw_server::serve_fd_epoll(
+                fd_control_path,
+                index,
+                params,
+                load,
+                keep_alive_requests,
+            );
+        }
+    }
+
     let runtime = Builder::new_multi_thread()
         .worker_threads(workers)
         .enable_io()
@@ -87,10 +130,30 @@ pub fn serve() -> Result<(), String> {
         .map_err(|e| format!("failed to build tokio runtime: {e}"))?;
 
     runtime.block_on(async move {
+        if let Some(fd_control_path) = fd_control_path {
+            #[cfg(unix)]
+            {
+                return serve_fd_control(
+                    &fd_control_path,
+                    index,
+                    params,
+                    load,
+                    keep_alive_requests,
+                )
+                .await;
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = fd_control_path;
+                return Err("fd control sockets are only supported on unix targets".to_string());
+            }
+        }
+
         if let Some(unix_socket_path) = unix_socket_path {
             #[cfg(unix)]
             {
-                return serve_unix(&unix_socket_path, index, params, load, keep_alive_requests).await;
+                return serve_unix(&unix_socket_path, index, params, load, keep_alive_requests)
+                    .await;
             }
             #[cfg(not(unix))]
             {
@@ -121,6 +184,110 @@ async fn serve_tcp(
             .map_err(|e| format!("accept error: {e}"))?;
         let _ = stream.set_nodelay(true);
         spawn_connection(stream, &index, &params, &load, keep_alive_requests);
+    }
+}
+
+#[cfg(unix)]
+async fn serve_fd_control(
+    control_path: &str,
+    index: Arc<Index>,
+    params: Arc<SearchParams>,
+    load: Arc<AtomicUsize>,
+    keep_alive_requests: usize,
+) -> Result<(), String> {
+    if let Some(parent) = Path::new(control_path).parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("failed to create socket dir {}: {e}", parent.display()))?;
+    }
+    try_delete_unix_socket(control_path);
+
+    let listener = StdUnixListener::bind(control_path)
+        .map_err(|e| format!("failed to bind fd control socket {control_path}: {e}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("failed to set fd control socket nonblocking: {e}"))?;
+    set_unix_socket_permissions(control_path);
+
+    let listener = UnixListener::from_std(listener)
+        .map_err(|e| format!("failed to create async fd control listener: {e}"))?;
+    let handle = Handle::current();
+    let keep_initial = env_bool("FD_CONTROL_PREBUFFER", false);
+
+    loop {
+        let (stream, _) = listener
+            .accept()
+            .await
+            .map_err(|e| format!("fd control accept error: {e}"))?;
+        let control = stream
+            .into_std()
+            .map_err(|e| format!("failed to convert fd control stream: {e}"))?;
+        control
+            .set_nonblocking(false)
+            .map_err(|e| format!("failed to set fd control stream blocking: {e}"))?;
+
+        let index = Arc::clone(&index);
+        let params = Arc::clone(&params);
+        let load = Arc::clone(&load);
+        let handle = handle.clone();
+
+        tokio::task::spawn_blocking(move || {
+            receive_fd_control_loop(
+                control,
+                handle,
+                index,
+                params,
+                load,
+                keep_alive_requests,
+                keep_initial,
+            );
+        });
+    }
+}
+
+#[cfg(unix)]
+fn receive_fd_control_loop(
+    control: StdUnixStream,
+    handle: Handle,
+    index: Arc<Index>,
+    params: Arc<SearchParams>,
+    load: Arc<AtomicUsize>,
+    keep_alive_requests: usize,
+    keep_initial: bool,
+) {
+    loop {
+        let received = match fdpass::receive_client_fd(&control, keep_initial) {
+            Ok(Some(received)) => received,
+            Ok(None) => return,
+            Err(err) => {
+                eprintln!("fd control receive error: {err}");
+                return;
+            }
+        };
+
+        let stream = unsafe { StdTcpStream::from_raw_fd(received.fd) };
+        let _ = stream.set_nodelay(true);
+        if let Err(err) = stream.set_nonblocking(true) {
+            eprintln!("fd client nonblocking error: {err}");
+            continue;
+        }
+
+        let stream = match tokio::net::TcpStream::from_std(stream) {
+            Ok(stream) => stream,
+            Err(err) => {
+                eprintln!("fd client async conversion error: {err}");
+                continue;
+            }
+        };
+
+        spawn_connection_on_handle(
+            &handle,
+            stream,
+            &index,
+            &params,
+            &load,
+            keep_alive_requests,
+            received.initial,
+        );
     }
 }
 
@@ -165,7 +332,33 @@ fn spawn_connection<S>(
     let load = Arc::clone(load);
 
     tokio::spawn(async move {
-        if let Err(err) = serve_connection(stream, index, params, load, keep_alive_requests).await {
+        if let Err(err) =
+            serve_connection(stream, index, params, load, keep_alive_requests, Vec::new()).await
+        {
+            eprintln!("connection error: {err}");
+        }
+    });
+}
+
+fn spawn_connection_on_handle<S>(
+    handle: &Handle,
+    stream: S,
+    index: &Arc<Index>,
+    params: &Arc<SearchParams>,
+    load: &Arc<AtomicUsize>,
+    keep_alive_requests: usize,
+    initial: Vec<u8>,
+) where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let index = Arc::clone(index);
+    let params = Arc::clone(params);
+    let load = Arc::clone(load);
+
+    handle.spawn(async move {
+        if let Err(err) =
+            serve_connection(stream, index, params, load, keep_alive_requests, initial).await
+        {
             eprintln!("connection error: {err}");
         }
     });
@@ -177,6 +370,7 @@ async fn serve_connection<S>(
     params: Arc<SearchParams>,
     load: Arc<AtomicUsize>,
     keep_alive_requests: usize,
+    initial: Vec<u8>,
 ) -> io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -184,7 +378,10 @@ where
     let mut rx = vec![0u8; RX_CAP];
     let mut responses: Vec<&'static [u8]> = Vec::with_capacity(MAX_BATCHED_RESPONSES);
     let mut head = 0usize;
-    let mut tail = 0usize;
+    let mut tail = initial.len().min(RX_CAP);
+    if tail > 0 {
+        rx[..tail].copy_from_slice(&initial[..tail]);
+    }
     let mut handled = 0usize;
 
     loop {
@@ -254,7 +451,7 @@ where
     }
 }
 
-fn parse_request(buf: &[u8]) -> ParsedRequest {
+pub(crate) fn parse_request(buf: &[u8]) -> ParsedRequest {
     let header_end = match find_header_end(buf) {
         Some(pos) => pos,
         None => return ParsedRequest::Incomplete,
@@ -303,7 +500,7 @@ fn parse_request(buf: &[u8]) -> ParsedRequest {
     ParsedRequest::Bad
 }
 
-fn process_fraud(
+pub(crate) fn process_fraud(
     body: &[u8],
     index: &Index,
     params: &SearchParams,
@@ -312,10 +509,6 @@ fn process_fraud(
     if body.len() > MAX_REQUEST_BYTES {
         return RESP_APPROVED_0;
     }
-
-    let Ok(body) = std::str::from_utf8(body) else {
-        return RESP_APPROVED_0;
-    };
 
     match parse_payload(body) {
         Ok(payload) => {
@@ -452,6 +645,10 @@ fn env_bool(name: &str, default: bool) -> bool {
 
 fn parse_unix_socket_path(bind_addr: &str) -> Option<&str> {
     bind_addr.strip_prefix("unix:")
+}
+
+fn parse_fd_control_path(bind_addr: &str) -> Option<&str> {
+    bind_addr.strip_prefix("fd:")
 }
 
 #[cfg(unix)]
