@@ -71,6 +71,7 @@ pub fn serve() -> Result<(), String> {
     let fd_epoll_raw = env_bool("FD_EPOLL_RAW", true);
     let fd_control_path = parse_fd_control_path(&bind_addr).map(str::to_owned);
     let unix_socket_path = parse_unix_socket_path(&bind_addr).map(str::to_owned);
+    let rpc_socket_path = parse_rpc_socket_path(&bind_addr).map(str::to_owned);
     let params = Arc::new(SearchParams::from_env());
     let index = Arc::new(Index::open(&index_path)?);
     if env_bool("PREFETCH_INDEX", true) {
@@ -81,7 +82,7 @@ pub fn serve() -> Result<(), String> {
     let load = Arc::new(AtomicUsize::new(0));
 
     eprintln!(
-        "serving on {bind_addr}, index={index_path}, references_gzip_sha256={}, references_json_sha256={}, profile_fastpaths_allowed={}, workers={workers}, keep_alive_requests={keep_alive_requests}, accept=manual-http1, fd_epoll_raw={fd_epoll_raw}, early_candidates={}, min_candidates={}, max_candidates={}, profile_fastpath={}, profile_min_count={}, profile_legit_min_count={}, profile_fraud_min_count={}, profile_dominant_fastpath={}, profile_dominant_min_count={}, profile_dominant_max_opposite={}, early_edge_fallback={}, exact_fallback={}, risky_fallback_refs={}, risky_semantic_groups={}, risky_semantic_radius={}, overload_min_candidates={}, overload_max_candidates={}, overload_threshold={}, overload_fast_only={}, search_fallback_last_distance={}, flat={}, fast_path={}, fast_only={}",
+        "serving on {bind_addr}, index={index_path}, references_gzip_sha256={}, references_json_sha256={}, profile_fastpaths_allowed={}, workers={workers}, keep_alive_requests={keep_alive_requests}, accept=manual-http1, fd_epoll_raw={fd_epoll_raw}, early_candidates={}, min_candidates={}, max_candidates={}, profile_fastpath={}, profile_min_count={}, profile_legit_min_count={}, profile_fraud_min_count={}, profile_dominant_fastpath={}, profile_dominant_min_count={}, profile_dominant_max_opposite={}, early_edge_fallback={}, exact_fallback={}, profile_exact_triggers={}, risky_fallback_refs={}, risky_semantic_groups={}, risky_semantic_radius={}, overload_min_candidates={}, overload_max_candidates={}, overload_threshold={}, overload_fast_only={}, search_fallback_last_distance={}, flat={}, fast_path={}, fast_only={}",
         index
             .references_gzip_sha256_hex()
             .unwrap_or_else(|| "none".to_string()),
@@ -101,6 +102,7 @@ pub fn serve() -> Result<(), String> {
         params.profile_dominant_max_opposite,
         params.early_edge_fallback,
         exact_fallback_name(params.exact_fallback),
+        params.profile_exact_triggers,
         index.risky_fallback_count(),
         params.risky_semantic_groups,
         params.risky_semantic_radius,
@@ -127,6 +129,24 @@ pub fn serve() -> Result<(), String> {
         }
     }
 
+    #[cfg(unix)]
+    if let Some(rpc_socket_path) = rpc_socket_path.as_deref() {
+        if env_bool("RPC_EPOLL_RAW", true) {
+            return crate::rpc_server::serve_rpc_raw(rpc_socket_path, index, params, load);
+        }
+    }
+
+    #[cfg(unix)]
+    if env_bool("TCP_EPOLL_RAW", false) && fd_control_path.is_none() && unix_socket_path.is_none() {
+        return crate::raw_server::serve_tcp_epoll(
+            &bind_addr,
+            index,
+            params,
+            load,
+            keep_alive_requests,
+        );
+    }
+
     let runtime = Builder::new_multi_thread()
         .worker_threads(workers)
         .enable_io()
@@ -151,6 +171,18 @@ pub fn serve() -> Result<(), String> {
             {
                 let _ = fd_control_path;
                 return Err("fd control sockets are only supported on unix targets".to_string());
+            }
+        }
+
+        if let Some(rpc_socket_path) = rpc_socket_path {
+            #[cfg(unix)]
+            {
+                return crate::rpc_server::serve_rpc(&rpc_socket_path, index, params, load).await;
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = rpc_socket_path;
+                return Err("rpc sockets are only supported on unix targets".to_string());
             }
         }
 
@@ -505,37 +537,62 @@ pub(crate) fn process_fraud(
     params: &SearchParams,
     load: &AtomicUsize,
 ) -> &'static [u8] {
+    fraud_response_from_code(process_fraud_code(body, index, params, load))
+}
+
+pub(crate) fn process_fraud_code(
+    body: &[u8],
+    index: &Index,
+    params: &SearchParams,
+    load: &AtomicUsize,
+) -> u8 {
     if body.len() > MAX_REQUEST_BYTES {
-        return RESP_APPROVED_0;
+        return 0;
     }
 
     match parse_payload(body) {
         Ok(payload) => {
-            let _guard = InFlightGuard::new(load);
             let query = vectorize(&payload);
-            let classify_params = params.for_load(load.load(Ordering::Relaxed));
-            let (approved, score) = index.classify(&query, &classify_params);
-            fraud_response(approved, score)
+            let (approved, score) = if params.overload_threshold == 0 {
+                index.classify(&query, params)
+            } else {
+                let _guard = InFlightGuard::new(load);
+                let classify_params = params.for_load(load.load(Ordering::Relaxed));
+                index.classify(&query, &classify_params)
+            };
+            fraud_response_code(approved, score)
         }
-        Err(_) => RESP_APPROVED_0,
+        Err(_) => 0,
     }
 }
 
-fn fraud_response(approved: bool, score: f32) -> &'static [u8] {
+fn fraud_response_code(approved: bool, score: f32) -> u8 {
     if approved {
         if score < 0.1 {
-            RESP_APPROVED_0
+            0
         } else if score < 0.3 {
-            RESP_APPROVED_02
+            1
         } else {
-            RESP_APPROVED_04
+            2
         }
     } else if score < 0.7 {
-        RESP_REJECTED_06
+        3
     } else if score < 0.9 {
-        RESP_REJECTED_08
+        4
     } else {
-        RESP_REJECTED_1
+        5
+    }
+}
+
+fn fraud_response_from_code(code: u8) -> &'static [u8] {
+    match code {
+        0 => RESP_APPROVED_0,
+        1 => RESP_APPROVED_02,
+        2 => RESP_APPROVED_04,
+        3 => RESP_REJECTED_06,
+        4 => RESP_REJECTED_08,
+        5 => RESP_REJECTED_1,
+        _ => RESP_APPROVED_0,
     }
 }
 
@@ -644,6 +701,10 @@ fn env_bool(name: &str, default: bool) -> bool {
 
 fn parse_unix_socket_path(bind_addr: &str) -> Option<&str> {
     bind_addr.strip_prefix("unix:")
+}
+
+fn parse_rpc_socket_path(bind_addr: &str) -> Option<&str> {
+    bind_addr.strip_prefix("rpc:")
 }
 
 fn warm_up_index(index: &Index, params: &SearchParams) {

@@ -2,7 +2,7 @@
 set -eu
 
 echo "Expected declared limits:"
-echo "  lb   cpu=0.15   memory=32MB"
-echo "  api1 cpu=0.425  memory=156MB"
-echo "  api2 cpu=0.425  memory=156MB"
+echo "  lb   cpu=0.90  memory=320MB"
+echo "  api1 cpu=0.05  memory=12MB"
+echo "  api2 cpu=0.05  memory=12MB"
 echo "  total cpu=1.0 memory=344MB"

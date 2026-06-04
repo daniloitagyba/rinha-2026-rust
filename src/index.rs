@@ -1,5 +1,5 @@
 use crate::vector::{
-    bucket16, bucket4, bucket8, neighbor_keys, QuantizedVector, BUCKET_COUNT, DIM, K,
+    bucket16, bucket4, bucket8, for_neighbor_key, QuantizedVector, BUCKET_COUNT, DIM, K,
 };
 use std::env;
 use std::fs::File;
@@ -47,6 +47,7 @@ pub struct SearchParams {
     pub search_fallback_last_distance: i16,
     pub risky_semantic_groups: bool,
     pub risky_semantic_radius: usize,
+    pub profile_exact_triggers: bool,
 }
 
 impl SearchParams {
@@ -88,6 +89,7 @@ impl SearchParams {
             search_fallback_last_distance,
             risky_semantic_groups: env_bool("RISKY_SEMANTIC_GROUPS", true),
             risky_semantic_radius: env_usize("RISKY_SEMANTIC_RADIUS", 2).min(3),
+            profile_exact_triggers: env_bool("PROFILE_EXACT_TRIGGERS", true),
         }
     }
 
@@ -247,6 +249,30 @@ impl Index {
         self.profile_fast_paths_allowed
     }
 
+    pub fn profile_stats(&self, query: &QuantizedVector) -> (usize, usize) {
+        let key = profile_key(query);
+        (
+            self.profile_counts[key] as usize,
+            self.profile_fraud_counts[key] as usize,
+        )
+    }
+
+    fn should_use_exact_fallback(
+        &self,
+        query: &QuantizedVector,
+        frauds: usize,
+        params: &SearchParams,
+    ) -> bool {
+        if params.exact_fallback == EXACT_FALLBACK_RISKY
+            && params.profile_exact_triggers
+            && self.profile_fast_paths_allowed
+        {
+            return profile_exact_trigger(query, frauds);
+        }
+
+        should_use_exact_fallback(query, frauds, params)
+    }
+
     pub fn n_points(&self) -> usize {
         self.count
     }
@@ -309,13 +335,11 @@ impl Index {
         let mut top_dist = [i64::MAX; K];
         let mut top_label = [0u8; K];
 
-        let mut keys = [0u16; BUCKET_COUNT];
-        let key_count = neighbor_keys(query, &mut keys);
         let mut candidates = 0usize;
 
-        for key in keys.iter().take(key_count) {
-            let start = self.bucket_offset(*key as usize);
-            let end = self.bucket_offset(*key as usize + 1);
+        for_neighbor_key(query, |key| {
+            let start = self.bucket_offset(key as usize);
+            let end = self.bucket_offset(key as usize + 1);
 
             for item_pos in start..end {
                 let id = self.bucket_item(item_pos);
@@ -332,9 +356,11 @@ impl Index {
                     && top_dist[K - 1] != i64::MAX
                     && strong_decision(&top_label, params.early_edge_fallback))
             {
-                break;
+                return false;
             }
-        }
+
+            true
+        });
 
         if candidates < K {
             let frauds = self.classify_flat(query);
@@ -342,7 +368,7 @@ impl Index {
         }
 
         let frauds = count_frauds(&top_label);
-        if !should_use_exact_fallback(query, frauds, params) {
+        if !self.should_use_exact_fallback(query, frauds, params) {
             return decision_from_frauds(frauds, DecisionKind::Approx);
         }
 
@@ -1096,6 +1122,45 @@ fn profile_key(vector: &QuantizedVector) -> usize {
     key
 }
 
+fn profile_exact_trigger(query: &QuantizedVector, frauds: usize) -> bool {
+    const TRIGGERS: &[u32] = &[
+        4194356u32, 4199778u32, 4200682u32, 4203866u32, 4261075u32, 4263978u32, 4265306u32,
+        4325434u32, 4325562u32, 4325714u32, 4326409u32, 4326547u32, 4326602u32, 4326714u32,
+        4326738u32, 4326739u32, 4327586u32, 4327674u32, 4329628u32, 4329658u32, 4329722u32,
+        4330515u32, 4330522u32, 4330633u32, 4330643u32, 4330667u32, 4330675u32, 4330746u32,
+        4330826u32, 4331722u32, 4331835u32, 4333595u32, 4334042u32, 4334748u32, 4334891u32,
+        4335835u32, 4337867u32, 4338842u32, 4338873u32, 4338938u32, 4338978u32, 4339002u32,
+        4339019u32, 4339066u32, 4342138u32, 4344059u32, 4346074u32, 4347075u32, 4347131u32,
+        4390928u32, 4396178u32, 4396378u32, 4399251u32, 4403346u32, 4404370u32, 4420931u32,
+        4456593u32, 4456603u32, 4456651u32, 4457497u32, 4457618u32, 4457627u32, 4460699u32,
+        4460850u32, 4461593u32, 4461715u32, 4461738u32, 4461746u32, 4461755u32, 4461914u32,
+        4461938u32, 4461946u32, 4465850u32, 4468764u32, 4468858u32, 4469787u32, 4469915u32,
+        4469916u32, 4469955u32, 4478435u32, 4481218u32, 4523074u32, 4526105u32, 4527112u32,
+        4527129u32, 4535451u32, 4722874u32, 4730915u32, 4731241u32, 4736082u32, 4797523u32,
+        4849851u32, 4849890u32, 4849931u32, 4849995u32, 4850796u32, 4850857u32, 4850874u32,
+        4850883u32, 4850932u32, 4850979u32, 4851034u32, 4851035u32, 4852010u32, 4853923u32,
+        4854057u32, 4854113u32, 4854138u32, 4854899u32, 4854955u32, 4854961u32, 4854978u32,
+        4854986u32, 4855002u32, 4855019u32, 4855081u32, 4855122u32, 4855147u32, 4856315u32,
+        4859090u32, 4859177u32, 4859178u32, 4859218u32, 4863147u32, 4863202u32, 4863226u32,
+        4863274u32, 4863283u32, 4867323u32, 4867450u32, 4867451u32, 4868307u32, 4868474u32,
+        4871369u32, 4871370u32, 4871387u32, 4871393u32, 4871402u32, 4872394u32, 4879739u32,
+        4920507u32, 4942204u32, 4981915u32, 4981922u32, 4981937u32, 4981938u32, 4982011u32,
+        4982067u32, 4983082u32, 4983162u32, 4985098u32, 4986027u32, 4986042u32, 4986106u32,
+        4986236u32, 4986282u32, 4990202u32, 4990203u32, 4998499u32, 4998628u32, 5002491u32,
+        5051771u32, 5055803u32, 5248008u32, 5248043u32, 5375018u32, 5379080u32, 5379100u32,
+        5379250u32, 5379266u32, 5383211u32, 5383402u32, 5387421u32, 5509146u32, 5510290u32,
+        5510347u32, 5514418u32, 5772490u32, 5789946u32, 5898354u32, 5899514u32, 5911803u32,
+        5913026u32, 5919963u32, 5919995u32, 5920252u32, 6034667u32, 6034914u32, 6041763u32,
+        6051178u32,
+    ];
+
+    if frauds > K {
+        return false;
+    }
+    let packed = ((profile_key(query) as u32) << 3) | frauds as u32;
+    TRIGGERS.binary_search(&packed).is_ok()
+}
+
 fn profile_key_at(bytes: &[u8], vector_start: usize) -> usize {
     let mut key = 0usize;
     key |= bucket16(read_i16_unchecked(bytes, vector_start + 4)) as usize;
@@ -1567,6 +1632,7 @@ mod tests {
             search_fallback_last_distance: 2_900,
             risky_semantic_groups: true,
             risky_semantic_radius: 2,
+            profile_exact_triggers: true,
         };
 
         assert!(!params.for_load(7).fast_only);

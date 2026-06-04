@@ -34,12 +34,12 @@ case "$RUNNER_PRESET" in
   default)
     ;;
   remote-ryzen)
-    API_CPU="${API_CPU:-0.300}"
-    LB_CPU="${LB_CPU:-0.110}"
+    API_CPU="${API_CPU:-0.050}"
+    LB_CPU="${LB_CPU:-0.900}"
     ;;
   remote-ryzen-hard)
-    API_CPU="${API_CPU:-0.300}"
-    LB_CPU="${LB_CPU:-0.108}"
+    API_CPU="${API_CPU:-0.050}"
+    LB_CPU="${LB_CPU:-0.900}"
     ;;
   *)
     echo "RUNNER_PRESET must be default, remote-ryzen or remote-ryzen-hard" >&2
@@ -274,7 +274,13 @@ if [ "$ready" != "1" ]; then
   exit 1
 fi
 
+K6_CPUSET_ARGS=""
+if [ -n "${K6_CPUSET:-}" ]; then
+  K6_CPUSET_ARGS="--cpuset-cpus=$K6_CPUSET"
+fi
+
 docker run --rm \
+  $K6_CPUSET_ARGS \
   --network "${PROJECT_NAME}_default" \
   -e BASE_URL="http://lb:9999" \
   -e RESULTS_PATH="/scripts/results.json" \

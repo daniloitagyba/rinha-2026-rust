@@ -113,7 +113,10 @@ pub fn bucket_key(v: &QuantizedVector) -> u16 {
         | (no_last << 15)) as u16
 }
 
-pub fn neighbor_keys(query: &QuantizedVector, out: &mut [u16; BUCKET_COUNT]) -> usize {
+pub fn for_neighbor_key<F>(query: &QuantizedVector, mut visit: F)
+where
+    F: FnMut(u16) -> bool,
+{
     let amount = bucket8(query[0]);
     let ratio = bucket8(query[2]);
     let km_home = bucket8(query[7]);
@@ -122,8 +125,6 @@ pub fn neighbor_keys(query: &QuantizedVector, out: &mut [u16; BUCKET_COUNT]) -> 
     let unknown_merchant = if query[11] > 0 { 1i32 } else { 0i32 };
     let card_present = if query[10] > 0 { 1i32 } else { 0i32 };
     let no_last = if query[5] < 0 { 1i32 } else { 0i32 };
-    let mut seen = [false; BUCKET_COUNT];
-    let mut n = 0usize;
 
     for radius in 0..8 {
         for a in (amount - radius).max(0)..=(amount + radius).min(7) {
@@ -142,6 +143,19 @@ pub fn neighbor_keys(query: &QuantizedVector, out: &mut [u16; BUCKET_COUNT]) -> 
                             for unknown in unknown_start..=unknown_end {
                                 for card in card_start..=card_end {
                                     for last in last_start..=last_end {
+                                        let first_radius = (a - amount)
+                                            .abs()
+                                            .max((r - ratio).abs())
+                                            .max((k - km_home).abs())
+                                            .max((tx - tx_count).abs())
+                                            .max((hr - hour).abs())
+                                            .max(if last == no_last { 0 } else { 2 })
+                                            .max(if unknown == unknown_merchant { 0 } else { 3 })
+                                            .max(if card == card_present { 0 } else { 3 });
+                                        if first_radius != radius {
+                                            continue;
+                                        }
+
                                         let key = (a
                                             | (r << 3)
                                             | (k << 6)
@@ -150,11 +164,9 @@ pub fn neighbor_keys(query: &QuantizedVector, out: &mut [u16; BUCKET_COUNT]) -> 
                                             | (unknown << 13)
                                             | (card << 14)
                                             | (last << 15))
-                                            as usize;
-                                        if !seen[key] {
-                                            seen[key] = true;
-                                            out[n] = key as u16;
-                                            n += 1;
+                                            as u16;
+                                        if !visit(key) {
+                                            return;
                                         }
                                     }
                                 }
@@ -165,8 +177,6 @@ pub fn neighbor_keys(query: &QuantizedVector, out: &mut [u16; BUCKET_COUNT]) -> 
             }
         }
     }
-
-    n
 }
 
 fn amount_vs_avg(amount: f64, avg: f64) -> f64 {

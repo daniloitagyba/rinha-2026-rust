@@ -9,7 +9,8 @@ use crate::index::{Index, SearchParams};
 use std::env;
 use std::fs;
 use std::io;
-use std::os::fd::RawFd;
+use std::net::TcpListener as StdTcpListener;
+use std::os::fd::{IntoRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -19,6 +20,7 @@ use std::time::Instant;
 
 const MAX_EVENTS: usize = 1024;
 const MAX_FD_SLOTS: usize = 65_536;
+const PENDING_CAP: usize = 8 * 1024;
 
 #[derive(Clone, Copy)]
 struct WaitTuning {
@@ -35,11 +37,13 @@ struct BusyPollTuning {
 }
 
 struct Conn {
-    buf: Vec<u8>,
+    buf: [u8; RX_CAP],
     head: usize,
     tail: usize,
-    pending: Vec<u8>,
+    pending: [u8; PENDING_CAP],
+    pending_len: usize,
     pending_off: usize,
+    registered_write: bool,
     handled: usize,
     close_after_write: bool,
 }
@@ -47,17 +51,19 @@ struct Conn {
 impl Conn {
     fn new_box() -> Box<Self> {
         Box::new(Self {
-            buf: vec![0u8; RX_CAP],
+            buf: [0u8; RX_CAP],
             head: 0,
             tail: 0,
-            pending: Vec::with_capacity(8192),
+            pending: [0u8; PENDING_CAP],
+            pending_len: 0,
             pending_off: 0,
+            registered_write: false,
             handled: 0,
             close_after_write: false,
         })
     }
 
-    fn reset(&mut self, initial: Vec<u8>) {
+    fn reset(&mut self, initial: &[u8]) {
         let tail = initial.len().min(RX_CAP);
         if tail > 0 {
             self.buf[..tail].copy_from_slice(&initial[..tail]);
@@ -65,10 +71,39 @@ impl Conn {
 
         self.head = 0;
         self.tail = tail;
-        self.pending.clear();
+        self.pending_len = 0;
         self.pending_off = 0;
+        self.registered_write = false;
         self.handled = 0;
         self.close_after_write = false;
+    }
+
+    fn has_pending(&self) -> bool {
+        self.pending_off < self.pending_len
+    }
+
+    fn append_pending(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let Some(end) = self.pending_len.checked_add(bytes.len()) else {
+            return Err(io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                "pending response overflow",
+            ));
+        };
+        if end > self.pending.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                "pending response buffer full",
+            ));
+        }
+
+        self.pending[self.pending_len..end].copy_from_slice(bytes);
+        self.pending_len = end;
+        Ok(())
+    }
+
+    fn clear_pending(&mut self) {
+        self.pending_len = 0;
+        self.pending_off = 0;
     }
 }
 
@@ -95,7 +130,7 @@ impl ConnTable {
         }
     }
 
-    fn insert(&mut self, fd: RawFd, initial: Vec<u8>) -> bool {
+    fn insert(&mut self, fd: RawFd, initial: &[u8]) -> bool {
         let idx = fd as usize;
         if idx >= self.slots.len() || self.slots[idx].is_some() {
             return false;
@@ -105,10 +140,6 @@ impl ConnTable {
         conn.reset(initial);
         self.slots[idx] = Some(conn);
         true
-    }
-
-    fn get(&self, fd: RawFd) -> Option<&Conn> {
-        self.slots.get(fd as usize)?.as_deref()
     }
 
     fn get_mut(&mut self, fd: RawFd) -> Option<&mut Conn> {
@@ -122,7 +153,7 @@ impl ConnTable {
         }
 
         if let Some(mut conn) = self.slots[idx].take() {
-            conn.reset(Vec::new());
+            conn.reset(&[]);
             if self.pool.len() < self.pool_cap {
                 self.pool.push(conn);
             }
@@ -226,8 +257,110 @@ pub fn serve_fd_epoll(
                 clients.remove(fd);
                 epoll_delete(epfd, fd);
                 close_fd(fd);
-            } else if let Some(conn) = clients.get(fd) {
-                let _ = epoll_mod(epfd, fd, client_interest(!conn.pending.is_empty()));
+            } else if let Some(conn) = clients.get_mut(fd) {
+                let needs_write = conn.has_pending();
+                if conn.registered_write != needs_write {
+                    let _ = epoll_mod(epfd, fd, client_interest(needs_write));
+                    conn.registered_write = needs_write;
+                }
+            }
+        }
+    }
+}
+
+pub fn serve_tcp_epoll(
+    bind_addr: &str,
+    index: Arc<Index>,
+    params: Arc<SearchParams>,
+    load: Arc<AtomicUsize>,
+    keep_alive_requests: usize,
+) -> Result<(), String> {
+    let listener = StdTcpListener::bind(bind_addr)
+        .map_err(|e| format!("failed to bind raw tcp listener {bind_addr}: {e}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("failed to set raw tcp listener nonblocking: {e}"))?;
+    let listener_fd = listener.into_raw_fd();
+    configure_tcp_listener(listener_fd);
+
+    let epfd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
+    if epfd < 0 {
+        close_fd(listener_fd);
+        return Err(format!(
+            "failed to create tcp epoll: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    let busy_poll = configure_busy_poll(epfd);
+
+    if let Err(err) = epoll_add(epfd, listener_fd, control_interest()) {
+        close_fd(listener_fd);
+        close_fd(epfd);
+        return Err(format!("failed to register tcp listener: {err}"));
+    }
+
+    let wait = WaitTuning {
+        timeout_ms: env_i32("FD_EPOLL_TIMEOUT_MS", 1),
+        spin_us: env_usize("FD_EPOLL_SPIN_US", 0),
+        idle_us: env_usize("FD_EPOLL_IDLE_US", 0),
+    };
+    let accept_batch = env_usize("TCP_ACCEPT_BATCH", 64);
+    let conn_pool_cap = env_usize("FD_CONN_POOL_CAP", 512);
+    let mut events = vec![empty_event(); MAX_EVENTS];
+    let mut clients = ConnTable::new(conn_pool_cap);
+
+    eprintln!(
+        "tcp epoll raw enabled, bind={bind_addr}, timeout_ms={}, spin_us={}, idle_us={}, busy_poll_us={}, busy_poll_budget={}, prefer_busy_poll={}, accept_batch={accept_batch}, conn_pool_cap={conn_pool_cap}",
+        wait.timeout_ms,
+        wait.spin_us,
+        wait.idle_us,
+        busy_poll.usecs,
+        busy_poll.budget,
+        busy_poll.prefer
+    );
+
+    loop {
+        let ready = wait_events(epfd, &mut events, wait)
+            .map_err(|err| format!("tcp epoll wait failed: {err}"))?;
+
+        for event in events.iter().take(ready as usize) {
+            let fd = event.u64 as RawFd;
+            let flags = event.events;
+
+            if fd == listener_fd {
+                accept_tcp_clients(
+                    listener_fd,
+                    epfd,
+                    accept_batch,
+                    &mut clients,
+                    &index,
+                    &params,
+                    &load,
+                    keep_alive_requests,
+                )?;
+                continue;
+            }
+
+            let mut should_close = is_closed_event(flags);
+            if let Some(conn) = clients.get_mut(fd) {
+                match handle_client(fd, flags, conn, &index, &params, &load, keep_alive_requests) {
+                    Ok(close) => should_close |= close,
+                    Err(_) => should_close = true,
+                }
+            } else {
+                should_close = true;
+            }
+
+            if should_close {
+                clients.remove(fd);
+                epoll_delete(epfd, fd);
+                close_fd(fd);
+            } else if let Some(conn) = clients.get_mut(fd) {
+                let needs_write = conn.has_pending();
+                if conn.registered_write != needs_write {
+                    let _ = epoll_mod(epfd, fd, client_interest(needs_write));
+                    conn.registered_write = needs_write;
+                }
             }
         }
     }
@@ -268,6 +401,77 @@ fn accept_controls(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn accept_tcp_clients(
+    listener_fd: RawFd,
+    epfd: RawFd,
+    accept_batch: usize,
+    clients: &mut ConnTable,
+    index: &Index,
+    params: &SearchParams,
+    load: &AtomicUsize,
+    keep_alive_requests: usize,
+) -> Result<(), String> {
+    for _ in 0..accept_batch {
+        let fd = unsafe {
+            libc::accept4(
+                listener_fd,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            if matches!(err.kind(), io::ErrorKind::WouldBlock) {
+                return Ok(());
+            }
+            return Err(format!("tcp accept error: {err}"));
+        }
+
+        configure_tcp_client(fd);
+        if !clients.insert(fd, &[]) {
+            close_fd(fd);
+            continue;
+        }
+
+        let mut close_now = false;
+        let mut has_pending = false;
+        let mut client_error = false;
+        if let Some(conn) = clients.get_mut(fd) {
+            if read_available(fd, conn).is_err()
+                || parse_available(fd, conn, index, params, load, keep_alive_requests).is_err()
+                || flush_pending(fd, conn).is_err()
+            {
+                client_error = true;
+            }
+            close_now = conn.close_after_write && !conn.has_pending();
+            has_pending = conn.has_pending();
+        }
+
+        if client_error || close_now {
+            clients.remove(fd);
+            close_fd(fd);
+            continue;
+        }
+
+        if let Some(conn) = clients.get_mut(fd) {
+            conn.registered_write = has_pending;
+        }
+
+        if let Err(err) = epoll_add(epfd, fd, client_interest(has_pending)) {
+            clients.remove(fd);
+            close_fd(fd);
+            return Err(format!("failed to register tcp client: {err}"));
+        }
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn receive_passed_fds(
     epfd: RawFd,
     control_fd: RawFd,
@@ -278,16 +482,21 @@ fn receive_passed_fds(
     load: &AtomicUsize,
     keep_alive_requests: usize,
 ) -> Result<(), String> {
+    let mut initial_buf = [0u8; RX_CAP];
     loop {
-        let received =
-            match fdpass::receive_client_fd_raw(control_fd, keep_initial, libc::MSG_DONTWAIT) {
-                Ok(Some(received)) => received,
-                Ok(None) => return Ok(()),
-                Err(err) => return Err(format!("fd control receive error: {err}")),
-            };
+        let received = match fdpass::receive_client_fd_raw_into(
+            control_fd,
+            keep_initial,
+            libc::MSG_DONTWAIT,
+            &mut initial_buf,
+        ) {
+            Ok(Some(received)) => received,
+            Ok(None) => return Ok(()),
+            Err(err) => return Err(format!("fd control receive error: {err}")),
+        };
 
         let fd = received.fd;
-        if !clients.insert(fd, received.initial) {
+        if !clients.insert(fd, &initial_buf[..received.initial_len]) {
             close_fd(fd);
             continue;
         }
@@ -303,8 +512,8 @@ fn receive_passed_fds(
                     client_error = true;
                 }
             }
-            close_now = conn.close_after_write && conn.pending.is_empty();
-            has_pending = !conn.pending.is_empty();
+            close_now = conn.close_after_write && !conn.has_pending();
+            has_pending = conn.has_pending();
         }
 
         if client_error {
@@ -317,6 +526,10 @@ fn receive_passed_fds(
             clients.remove(fd);
             close_fd(fd);
             continue;
+        }
+
+        if let Some(conn) = clients.get_mut(fd) {
+            conn.registered_write = has_pending;
         }
 
         if let Err(err) = epoll_add(epfd, fd, client_interest(has_pending)) {
@@ -339,7 +552,7 @@ fn handle_client(
     if flags & libc::EPOLLOUT as u32 != 0 {
         flush_pending(fd, conn)?;
     }
-    if conn.close_after_write && conn.pending.is_empty() {
+    if conn.close_after_write && !conn.has_pending() {
         return Ok(true);
     }
 
@@ -349,7 +562,7 @@ fn handle_client(
         flush_pending(fd, conn)?;
     }
 
-    Ok(conn.close_after_write && conn.pending.is_empty())
+    Ok(conn.close_after_write && !conn.has_pending())
 }
 
 fn read_available(fd: RawFd, conn: &mut Conn) -> io::Result<()> {
@@ -445,8 +658,8 @@ fn parse_available(
 }
 
 fn write_or_buffer(fd: RawFd, conn: &mut Conn, response: &'static [u8]) -> io::Result<()> {
-    if !conn.pending.is_empty() {
-        conn.pending.extend_from_slice(response);
+    if conn.has_pending() {
+        conn.append_pending(response)?;
         return Ok(());
     }
 
@@ -472,7 +685,7 @@ fn write_or_buffer(fd: RawFd, conn: &mut Conn, response: &'static [u8]) -> io::R
                 continue;
             }
             if matches!(err.kind(), io::ErrorKind::WouldBlock) {
-                conn.pending.extend_from_slice(&response[off..]);
+                conn.append_pending(&response[off..])?;
                 return Ok(());
             }
             return Err(err);
@@ -483,8 +696,8 @@ fn write_or_buffer(fd: RawFd, conn: &mut Conn, response: &'static [u8]) -> io::R
 }
 
 fn flush_pending(fd: RawFd, conn: &mut Conn) -> io::Result<()> {
-    while conn.pending_off < conn.pending.len() {
-        let out = &conn.pending[conn.pending_off..];
+    while conn.pending_off < conn.pending_len {
+        let out = &conn.pending[conn.pending_off..conn.pending_len];
         let sent = unsafe { libc::send(fd, out.as_ptr().cast(), out.len(), send_flags()) };
         if sent == 0 {
             return Err(io::Error::new(
@@ -506,8 +719,7 @@ fn flush_pending(fd: RawFd, conn: &mut Conn) -> io::Result<()> {
     }
 
     if conn.pending_off > 0 {
-        conn.pending.clear();
-        conn.pending_off = 0;
+        conn.clear_pending();
     }
     Ok(())
 }
@@ -563,6 +775,56 @@ fn is_closed_event(flags: u32) -> bool {
 fn close_fd(fd: RawFd) {
     unsafe {
         let _ = libc::close(fd);
+    }
+}
+
+fn configure_tcp_listener(fd: RawFd) {
+    let one = 1;
+    unsafe {
+        let _ = libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_REUSEADDR,
+            (&one as *const libc::c_int).cast(),
+            std::mem::size_of_val(&one) as libc::socklen_t,
+        );
+        #[cfg(target_os = "linux")]
+        if env_bool("TCP_DEFER_ACCEPT", true) {
+            let _ = libc::setsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_DEFER_ACCEPT,
+                (&one as *const libc::c_int).cast(),
+                std::mem::size_of_val(&one) as libc::socklen_t,
+            );
+        }
+    }
+}
+
+fn configure_tcp_client(fd: RawFd) {
+    if !env_bool("TCP_CLIENT_SETUP", true) {
+        return;
+    }
+
+    let one = 1;
+    unsafe {
+        let _ = libc::setsockopt(
+            fd,
+            libc::IPPROTO_TCP,
+            libc::TCP_NODELAY,
+            (&one as *const libc::c_int).cast(),
+            std::mem::size_of_val(&one) as libc::socklen_t,
+        );
+        #[cfg(target_os = "linux")]
+        {
+            let _ = libc::setsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_QUICKACK,
+                (&one as *const libc::c_int).cast(),
+                std::mem::size_of_val(&one) as libc::socklen_t,
+            );
+        }
     }
 }
 

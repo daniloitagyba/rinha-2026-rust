@@ -12,6 +12,7 @@ pub fn run(input: &str) -> Result<(), String> {
     let limit = env_usize("EVAL_LIMIT", usize::MAX);
     let errors_path = env::var("EVAL_ERRORS_PATH").ok();
     let dump_path = env::var("EVAL_DUMP_PATH").ok();
+    let dump_profile_stats = env_bool("EVAL_PROFILE_STATS", false);
     let data = fs::read_to_string(input).map_err(|e| format!("failed to read {input}: {e}"))?;
     let index = Index::open(&index_path)?;
     let params = SearchParams::from_env();
@@ -65,6 +66,7 @@ pub fn run(input: &str) -> Result<(), String> {
                 }
 
                 if let Some(writer) = dump_writer.as_mut() {
+                    let profile_stats = dump_profile_stats.then(|| index.profile_stats(&query));
                     write_eval_row(
                         writer,
                         expected,
@@ -72,12 +74,14 @@ pub fn run(input: &str) -> Result<(), String> {
                         fraud_count,
                         kind,
                         Some(&query),
+                        profile_stats,
                         None,
                     )?;
                 }
 
                 if approved != expected {
                     if let Some(writer) = error_writer.as_mut() {
+                        let profile_stats = dump_profile_stats.then(|| index.profile_stats(&query));
                         write_eval_row(
                             writer,
                             expected,
@@ -85,6 +89,7 @@ pub fn run(input: &str) -> Result<(), String> {
                             fraud_count,
                             kind,
                             Some(&query),
+                            profile_stats,
                             Some(&data[request_start..=request_end]),
                         )?;
                     }
@@ -147,7 +152,7 @@ pub fn run(input: &str) -> Result<(), String> {
     );
     println!("risky_fallback_refs={}", index.risky_fallback_count());
     println!(
-        "params early_candidates={} min_candidates={} max_candidates={} profile_fastpath={} profile_min_count={} profile_legit_min_count={} profile_fraud_min_count={} profile_dominant_fastpath={} profile_dominant_min_count={} profile_dominant_max_opposite={} early_edge_fallback={} exact_fallback={} risky_semantic_groups={} risky_semantic_radius={} overload_min_candidates={} overload_max_candidates={} overload_threshold={} overload_fast_only={} search_fallback_last_distance={} flat={} fast_path={} fast_only={}",
+        "params early_candidates={} min_candidates={} max_candidates={} profile_fastpath={} profile_min_count={} profile_legit_min_count={} profile_fraud_min_count={} profile_dominant_fastpath={} profile_dominant_min_count={} profile_dominant_max_opposite={} early_edge_fallback={} exact_fallback={} profile_exact_triggers={} risky_semantic_groups={} risky_semantic_radius={} overload_min_candidates={} overload_max_candidates={} overload_threshold={} overload_fast_only={} search_fallback_last_distance={} flat={} fast_path={} fast_only={}",
         params.early_candidates,
         params.min_candidates,
         params.max_candidates,
@@ -160,6 +165,7 @@ pub fn run(input: &str) -> Result<(), String> {
         params.profile_dominant_max_opposite,
         params.early_edge_fallback,
         exact_fallback_name(params.exact_fallback),
+        params.profile_exact_triggers,
         params.risky_semantic_groups,
         params.risky_semantic_radius,
         params.overload_min_candidates,
@@ -268,6 +274,13 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn env_bool(name: &str, default: bool) -> bool {
+    env::var(name)
+        .ok()
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(default)
+}
+
 fn detection_score(weighted_errors: usize, failure_rate: f64, epsilon: f64) -> f64 {
     if failure_rate > 0.15 {
         return -3000.0;
@@ -307,6 +320,7 @@ fn write_eval_row(
     fraud_count: usize,
     kind: DecisionKind,
     vector: Option<&[i16; 14]>,
+    profile_stats: Option<(usize, usize)>,
     request: Option<&str>,
 ) -> Result<(), String> {
     write!(
@@ -330,6 +344,15 @@ fn write_eval_row(
             write!(writer, "{value}").map_err(|e| e.to_string())?;
         }
         writer.write_all(b"]").map_err(|e| e.to_string())?;
+    }
+
+    if let Some((profile_count, profile_frauds)) = profile_stats {
+        write!(
+            writer,
+            ",\"profile_count\":{},\"profile_frauds\":{}",
+            profile_count, profile_frauds
+        )
+        .map_err(|e| e.to_string())?;
     }
 
     if let Some(request) = request {

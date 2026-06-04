@@ -58,20 +58,20 @@ if ([string]::IsNullOrWhiteSpace($K6Image)) {
 switch ($RunnerPreset) {
     "remote-ryzen" {
         if ([string]::IsNullOrWhiteSpace($ApiCpu)) {
-            $ApiCpu = "0.300"
+            $ApiCpu = "0.050"
         }
 
         if ([string]::IsNullOrWhiteSpace($LbCpu)) {
-            $LbCpu = "0.110"
+            $LbCpu = "0.900"
         }
     }
     "remote-ryzen-hard" {
         if ([string]::IsNullOrWhiteSpace($ApiCpu)) {
-            $ApiCpu = "0.300"
+            $ApiCpu = "0.050"
         }
 
         if ([string]::IsNullOrWhiteSpace($LbCpu)) {
-            $LbCpu = "0.108"
+            $LbCpu = "0.900"
         }
     }
 }

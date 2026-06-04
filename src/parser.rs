@@ -268,7 +268,15 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || needle.len() > haystack.len() {
         return None;
     }
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
+
+    let first = needle[0];
+    let last_start = haystack.len() - needle.len();
+    let mut pos = 0usize;
+    while pos <= last_start {
+        if haystack[pos] == first && &haystack[pos..pos + needle.len()] == needle {
+            return Some(pos);
+        }
+        pos += 1;
+    }
+    None
 }
