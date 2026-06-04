@@ -9,8 +9,8 @@ use crate::index::{Index, SearchParams};
 use std::env;
 use std::fs;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::os::fd::RawFd;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::atomic::AtomicUsize;
@@ -25,6 +25,13 @@ struct WaitTuning {
     timeout_ms: i32,
     spin_us: usize,
     idle_us: usize,
+}
+
+#[derive(Clone, Copy)]
+struct BusyPollTuning {
+    usecs: u32,
+    budget: u16,
+    prefer: u8,
 }
 
 struct Conn {
@@ -146,6 +153,7 @@ pub fn serve_fd_epoll(
             io::Error::last_os_error()
         ));
     }
+    let busy_poll = configure_busy_poll(epfd);
 
     epoll_add(epfd, listener_fd, control_interest())
         .map_err(|e| format!("failed to register fd control listener: {e}"))?;
@@ -162,10 +170,13 @@ pub fn serve_fd_epoll(
     let mut clients = ConnTable::new(conn_pool_cap);
 
     eprintln!(
-        "fd epoll raw enabled, control={control_path}, timeout_ms={}, spin_us={}, idle_us={}, keep_initial={keep_initial}, conn_pool_cap={conn_pool_cap}",
+        "fd epoll raw enabled, control={control_path}, timeout_ms={}, spin_us={}, idle_us={}, busy_poll_us={}, busy_poll_budget={}, prefer_busy_poll={}, keep_initial={keep_initial}, conn_pool_cap={conn_pool_cap}",
         wait.timeout_ms,
         wait.spin_us,
-        wait.idle_us
+        wait.idle_us,
+        busy_poll.usecs,
+        busy_poll.budget,
+        busy_poll.prefer
     );
 
     loop {
@@ -203,15 +214,7 @@ pub fn serve_fd_epoll(
 
             let mut should_close = is_closed_event(flags);
             if let Some(conn) = clients.get_mut(fd) {
-                match handle_client(
-                    fd,
-                    flags,
-                    conn,
-                    &index,
-                    &params,
-                    &load,
-                    keep_alive_requests,
-                ) {
+                match handle_client(fd, flags, conn, &index, &params, &load, keep_alive_requests) {
                     Ok(close) => should_close |= close,
                     Err(_) => should_close = true,
                 }
@@ -245,11 +248,11 @@ fn accept_controls(
             )
         };
         if fd >= 0 {
-                if let Err(err) = epoll_add(epfd, fd, control_interest()) {
-                    close_fd(fd);
-                    return Err(format!("failed to register fd control stream: {err}"));
-                }
-                controls.push(fd);
+            if let Err(err) = epoll_add(epfd, fd, control_interest()) {
+                close_fd(fd);
+                return Err(format!("failed to register fd control stream: {err}"));
+            }
+            controls.push(fd);
             continue;
         }
 
@@ -458,7 +461,10 @@ fn write_or_buffer(fd: RawFd, conn: &mut Conn, response: &'static [u8]) -> io::R
             )
         };
         if sent == 0 {
-            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "send returned zero"));
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "send returned zero",
+            ));
         }
         if sent < 0 {
             let err = io::Error::last_os_error();
@@ -481,7 +487,10 @@ fn flush_pending(fd: RawFd, conn: &mut Conn) -> io::Result<()> {
         let out = &conn.pending[conn.pending_off..];
         let sent = unsafe { libc::send(fd, out.as_ptr().cast(), out.len(), send_flags()) };
         if sent == 0 {
-            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "send returned zero"));
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "send returned zero",
+            ));
         }
         if sent < 0 {
             let err = io::Error::last_os_error();
@@ -591,28 +600,70 @@ fn create_control_listener(control_path: &str) -> Result<RawFd, String> {
     for (slot, byte) in addr.sun_path.iter_mut().zip(path_bytes.iter()) {
         *slot = *byte as libc::c_char;
     }
-    let len =
-        (std::mem::size_of::<libc::sa_family_t>() + path_bytes.len() + 1) as libc::socklen_t;
+    let len = (std::mem::size_of::<libc::sa_family_t>() + path_bytes.len() + 1) as libc::socklen_t;
 
     if unsafe { libc::bind(fd, (&addr as *const libc::sockaddr_un).cast(), len) } < 0 {
         let err = io::Error::last_os_error();
         close_fd(fd);
-        return Err(format!("failed to bind fd control socket {control_path}: {err}"));
+        return Err(format!(
+            "failed to bind fd control socket {control_path}: {err}"
+        ));
     }
     if unsafe { libc::listen(fd, env_i32("FD_CONTROL_BACKLOG", 4096)) } < 0 {
         let err = io::Error::last_os_error();
         close_fd(fd);
-        return Err(format!("failed to listen on fd control socket {control_path}: {err}"));
+        return Err(format!(
+            "failed to listen on fd control socket {control_path}: {err}"
+        ));
     }
 
     Ok(fd)
 }
 
-fn wait_events(
-    epfd: RawFd,
-    events: &mut [libc::epoll_event],
-    wait: WaitTuning,
-) -> io::Result<i32> {
+fn configure_busy_poll(epfd: RawFd) -> BusyPollTuning {
+    let tuning = BusyPollTuning {
+        usecs: env_u32_any("FD_EPOLL_BUSY_POLL_US", "EPOLL_BUSY_POLL_US", 0),
+        budget: env_u32_any("FD_EPOLL_BUSY_POLL_BUDGET", "EPOLL_BUSY_POLL_BUDGET", 8) as u16,
+        prefer: env_u32_any("FD_EPOLL_PREFER_BUSY_POLL", "EPOLL_PREFER_BUSY_POLL", 1) as u8,
+    };
+
+    #[cfg(target_os = "linux")]
+    {
+        if tuning.usecs == 0 && tuning.prefer == 0 {
+            return tuning;
+        }
+
+        #[repr(C)]
+        struct EpollParams {
+            busy_poll_usecs: u32,
+            busy_poll_budget: u16,
+            prefer_busy_poll: u8,
+            _pad: u8,
+        }
+
+        const fn iow(ty: u32, nr: u32, size: u32) -> libc::c_ulong {
+            ((1u32 << 30) | (size << 16) | (ty << 8) | nr) as libc::c_ulong
+        }
+
+        const EPIOCSPARAMS: libc::c_ulong =
+            iow(0x8A, 0x01, std::mem::size_of::<EpollParams>() as u32);
+
+        let params = EpollParams {
+            busy_poll_usecs: tuning.usecs,
+            busy_poll_budget: tuning.budget,
+            prefer_busy_poll: tuning.prefer,
+            _pad: 0,
+        };
+
+        unsafe {
+            libc::ioctl(epfd, EPIOCSPARAMS, &params as *const EpollParams);
+        }
+    }
+
+    tuning
+}
+
+fn wait_events(epfd: RawFd, events: &mut [libc::epoll_event], wait: WaitTuning) -> io::Result<i32> {
     if wait.spin_us == 0 && wait.idle_us == 0 {
         return epoll_wait_ms(epfd, events, wait.timeout_ms);
     }
@@ -718,6 +769,14 @@ fn env_i32(name: &str, default: i32) -> i32 {
     env::var(name)
         .ok()
         .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(default)
+}
+
+fn env_u32_any(primary: &str, fallback_name: &str, default: u32) -> u32 {
+    env::var(primary)
+        .ok()
+        .or_else(|| env::var(fallback_name).ok())
+        .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(default)
 }
 

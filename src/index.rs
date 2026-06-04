@@ -247,6 +247,24 @@ impl Index {
         self.profile_fast_paths_allowed
     }
 
+    pub fn n_points(&self) -> usize {
+        self.count
+    }
+
+    pub fn point(&self, id: usize) -> Option<QuantizedVector> {
+        if id >= self.count {
+            return None;
+        }
+
+        let bytes = self.mmap.as_slice();
+        let start = self.vectors_offset + id * DIM * 2;
+        let mut point = [0i16; DIM];
+        for (dim, value) in point.iter_mut().enumerate() {
+            *value = read_i16_unchecked(bytes, start + dim * 2);
+        }
+        Some(point)
+    }
+
     pub fn prefault(&self) -> usize {
         let bytes = self.mmap.as_slice();
         let mut checksum = 0usize;
@@ -426,7 +444,10 @@ impl Index {
         for mcc in mcc_start..=mcc_end {
             for ratio in ratio_start..=ratio_end {
                 for tx in tx_start..=tx_end {
-                    let key = broad_key | ((mcc as usize) << 4) | ((ratio as usize) << 6) | ((tx as usize) << 7);
+                    let key = broad_key
+                        | ((mcc as usize) << 4)
+                        | ((ratio as usize) << 6)
+                        | ((tx as usize) << 7);
                     let ids = &self.risky_semantic_groups[key];
                     candidates += ids.len();
                     for &id in ids {
@@ -1302,48 +1323,47 @@ impl Mmap {
         }
         #[cfg(unix)]
         {
-            use std::ffi::c_void;
             use std::os::fd::AsRawFd;
-            const PROT_READ: i32 = 0x1;
-            const MAP_PRIVATE: i32 = 0x02;
-            #[cfg(target_os = "linux")]
-            const MAP_POPULATE: i32 = 0x8000;
 
-            extern "C" {
-                fn mmap(
-                    addr: *mut c_void,
-                    length: usize,
-                    prot: i32,
-                    flags: i32,
-                    fd: i32,
-                    offset: isize,
-                ) -> *mut c_void;
-            }
-
-            let mut flags = MAP_PRIVATE;
+            let huge_copy = env_bool("INDEX_HUGE", false);
+            let mut flags = libc::MAP_PRIVATE;
             #[cfg(target_os = "linux")]
-            if env_bool("INDEX_MMAP_POPULATE", true) {
-                flags |= MAP_POPULATE;
+            if env_bool("INDEX_MMAP_POPULATE", !huge_copy) {
+                flags |= libc::MAP_POPULATE;
             }
 
             let ptr = unsafe {
-                mmap(
+                libc::mmap(
                     std::ptr::null_mut(),
                     len,
-                    PROT_READ,
+                    libc::PROT_READ,
                     flags,
                     file.as_raw_fd(),
                     0,
                 )
             };
-            if ptr as isize == -1 {
+            if ptr == libc::MAP_FAILED {
                 return Err(io::Error::last_os_error());
             }
-            let mapped = Self {
+
+            let mut mapped = Self {
                 ptr: ptr as *mut u8,
                 len,
             };
+
+            #[cfg(target_os = "linux")]
+            if huge_copy {
+                if let Some(huge_ptr) = unsafe { hugepage_copy(mapped.ptr, mapped.len) } {
+                    unsafe {
+                        libc::munmap(mapped.ptr.cast(), mapped.len);
+                    }
+                    mapped = Self { ptr: huge_ptr, len };
+                }
+            }
+
             mapped.advise();
+            mapped.lock_if_requested();
+            mapped.report_hugepages();
             Ok(mapped)
         }
         #[cfg(not(unix))]
@@ -1380,6 +1400,83 @@ impl Mmap {
             }
         }
     }
+
+    #[cfg(target_os = "linux")]
+    fn lock_if_requested(&self) {
+        if !env_bool("INDEX_MLOCK", false) {
+            return;
+        }
+
+        let rc = unsafe { libc::mlock(self.ptr.cast(), self.len) };
+        if rc != 0 {
+            eprintln!("index mlock failed: {}", io::Error::last_os_error());
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn lock_if_requested(&self) {}
+
+    #[cfg(target_os = "linux")]
+    fn report_hugepages(&self) {
+        if !env_bool("INDEX_REPORT_HUGEPAGES", env_bool("INDEX_HUGE", false)) {
+            return;
+        }
+
+        let want = self.ptr as usize;
+        let Ok(smaps) = std::fs::read_to_string("/proc/self/smaps") else {
+            return;
+        };
+
+        let mut hit = false;
+        for line in smaps.lines() {
+            if let Some((head, _)) = line.split_once('-') {
+                if let Ok(addr) = usize::from_str_radix(head, 16) {
+                    hit = addr == want;
+                    continue;
+                }
+            }
+
+            if hit {
+                if let Some(value) = line.strip_prefix("AnonHugePages:") {
+                    let kb = value
+                        .trim()
+                        .trim_end_matches(" kB")
+                        .trim()
+                        .parse::<u64>()
+                        .unwrap_or(0);
+                    eprintln!("index huge pages: {}/{} MiB", kb / 1024, self.len >> 20);
+                    return;
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn report_hugepages(&self) {}
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn hugepage_copy(src: *const u8, len: usize) -> Option<*mut u8> {
+    let ptr = libc::mmap(
+        std::ptr::null_mut(),
+        len,
+        libc::PROT_READ | libc::PROT_WRITE,
+        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+        -1,
+        0,
+    );
+    if ptr == libc::MAP_FAILED {
+        return None;
+    }
+
+    let dst = ptr.cast::<u8>();
+    let _ = libc::madvise(ptr, len, 14);
+    std::ptr::copy_nonoverlapping(src, dst, len);
+    if libc::mprotect(ptr, len, libc::PROT_READ) != 0 {
+        let _ = libc::munmap(ptr, len);
+        return None;
+    }
+    Some(dst)
 }
 
 impl Drop for Mmap {

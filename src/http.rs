@@ -2,7 +2,7 @@
 use crate::fdpass;
 use crate::index::{exact_fallback_name, Index, SearchParams};
 use crate::parser::parse_payload;
-use crate::vector::vectorize;
+use crate::vector::{vectorize, QuantizedVector, SCALE};
 use std::env;
 #[cfg(unix)]
 use std::fs;
@@ -42,8 +42,7 @@ const RESP_REJECTED_08: &[u8] =
 const RESP_REJECTED_1: &[u8] =
     b"HTTP/1.1 200 OK\r\nContent-Length:36\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}";
 pub(crate) const RESP_READY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length:0\r\n\r\n";
-pub(crate) const RESP_NOT_FOUND: &[u8] =
-    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+pub(crate) const RESP_NOT_FOUND: &[u8] = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
 pub(crate) const RESP_BAD_REQUEST: &[u8] =
     b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
@@ -78,6 +77,7 @@ pub fn serve() -> Result<(), String> {
         let checksum = index.prefault();
         eprintln!("prefetched index pages, checksum={checksum}");
     }
+    warm_up_index(&index, &params);
     let load = Arc::new(AtomicUsize::new(0));
 
     eprintln!(
@@ -644,6 +644,63 @@ fn env_bool(name: &str, default: bool) -> bool {
 
 fn parse_unix_socket_path(bind_addr: &str) -> Option<&str> {
     bind_addr.strip_prefix("unix:")
+}
+
+fn warm_up_index(index: &Index, params: &SearchParams) {
+    let count = env_usize("API_WARMUP_QUERIES", 0);
+    if count == 0 || index.n_points() == 0 {
+        return;
+    }
+
+    let jitter = env_usize("API_WARMUP_JITTER", 120).min(SCALE as usize) as i16;
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut checksum = 0u8;
+
+    for _ in 0..count {
+        let id = ((lcg(&mut state) >> 33) as usize) % index.n_points();
+        let Some(mut query) = index.point(id) else {
+            continue;
+        };
+        apply_warmup_jitter(&mut query, &mut state, jitter);
+        let (approved, score) = index.classify(&query, params);
+        checksum ^= (approved as u8) << 7;
+        checksum ^= (score * 10.0) as u8;
+    }
+
+    std::hint::black_box(checksum);
+    eprintln!("warmed index with {count} synthetic queries, checksum={checksum}");
+}
+
+#[inline]
+fn lcg(state: &mut u64) -> u64 {
+    *state = state
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
+    *state
+}
+
+fn apply_warmup_jitter(query: &mut QuantizedVector, state: &mut u64, jitter: i16) {
+    if jitter <= 0 {
+        return;
+    }
+
+    const CONTINUOUS_DIMS: [usize; 9] = [0, 1, 2, 3, 4, 7, 8, 12, 13];
+    for dim in CONTINUOUS_DIMS {
+        query[dim] = jitter_value(query[dim], state, jitter);
+    }
+    if query[5] != -(SCALE as i16) {
+        query[5] = jitter_value(query[5], state, jitter);
+    }
+    if query[6] != -(SCALE as i16) {
+        query[6] = jitter_value(query[6], state, jitter);
+    }
+}
+
+#[inline]
+fn jitter_value(value: i16, state: &mut u64, jitter: i16) -> i16 {
+    let span = (2 * jitter as i64 + 1) as u64;
+    let delta = (lcg(state) % span) as i64 - jitter as i64;
+    (value as i64 + delta).clamp(-(SCALE as i64), SCALE as i64) as i16
 }
 
 fn parse_fd_control_path(bind_addr: &str) -> Option<&str> {
