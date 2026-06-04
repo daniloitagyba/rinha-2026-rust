@@ -7,6 +7,7 @@ MODE="${MODE:-submission}"
 RUNNER_PRESET="${RUNNER_PRESET:-default}"
 PROJECT_NAME="${PROJECT_NAME:-rinha-rust-local}"
 K6_IMAGE="${K6_IMAGE:-grafana/k6:latest}"
+HOST_PORT="${HOST_PORT:-9999}"
 SUBMISSION_COMPOSE_FILE="${SUBMISSION_COMPOSE_FILE:-}"
 KEEP_SERVICES="${KEEP_SERVICES:-0}"
 REFRESH_DATA="${REFRESH_DATA:-0}"
@@ -299,7 +300,7 @@ fi
 
 ready=0
 for _ in $(seq 1 90); do
-  if curl -fsS "http://127.0.0.1:9999/ready" >/dev/null 2>&1; then
+  if curl -fsS "http://127.0.0.1:$HOST_PORT/ready" >/dev/null 2>&1; then
     ready=1
     break
   fi
@@ -307,7 +308,7 @@ for _ in $(seq 1 90); do
 done
 
 if [ "$ready" != "1" ]; then
-  echo "backend did not become ready on http://127.0.0.1:9999/ready" >&2
+  echo "backend did not become ready on http://127.0.0.1:$HOST_PORT/ready" >&2
   exit 1
 fi
 

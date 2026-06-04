@@ -5,6 +5,7 @@ param(
     [string]$RunnerPreset = "default",
     [string]$ProjectName = "rinha-rust-local",
     [string]$K6Image = $env:K6_IMAGE,
+    [string]$HostPort = $env:HOST_PORT,
     [string]$EarlyCandidates = $env:EARLY_CANDIDATES,
     [string]$MinCandidates = $env:MIN_CANDIDATES,
     [string]$MaxCandidates = $env:MAX_CANDIDATES,
@@ -63,6 +64,10 @@ $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($K6Image)) {
     $K6Image = "grafana/k6:latest"
+}
+
+if ([string]::IsNullOrWhiteSpace($HostPort)) {
+    $HostPort = "9999"
 }
 
 switch ($RunnerPreset) {
@@ -318,7 +323,7 @@ try {
     $ready = $false
     for ($i = 0; $i -lt 90; $i++) {
         try {
-            $response = Invoke-WebRequest -Uri "http://127.0.0.1:9999/ready" -UseBasicParsing -TimeoutSec 2
+            $response = Invoke-WebRequest -Uri "http://127.0.0.1:$HostPort/ready" -UseBasicParsing -TimeoutSec 2
             if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
                 $ready = $true
                 break
@@ -329,7 +334,7 @@ try {
     }
 
     if (-not $ready) {
-        throw "backend did not become ready on http://127.0.0.1:9999/ready"
+        throw "backend did not become ready on http://127.0.0.1:$HostPort/ready"
     }
 
     $mount = "${testDir}:/scripts"

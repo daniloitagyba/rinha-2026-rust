@@ -74,12 +74,12 @@ static struct rpc_conn *rpc_by_fd[MAX_FD_SLOTS];
 static const char resp_ready[] = "HTTP/1.1 200 OK\r\nContent-Length:0\r\n\r\n";
 static const char resp_not_found[] = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
 static const char resp_bad_request[] = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-static const char resp_approved_0[] = "HTTP/1.1 200 OK\r\nContent-Length:35\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}";
-static const char resp_approved_02[] = "HTTP/1.1 200 OK\r\nContent-Length:35\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}";
-static const char resp_approved_04[] = "HTTP/1.1 200 OK\r\nContent-Length:35\r\n\r\n{\"approved\":true,\"fraud_score\":0.4}";
-static const char resp_rejected_06[] = "HTTP/1.1 200 OK\r\nContent-Length:36\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}";
-static const char resp_rejected_08[] = "HTTP/1.1 200 OK\r\nContent-Length:36\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}";
-static const char resp_rejected_1[] = "HTTP/1.1 200 OK\r\nContent-Length:36\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}";
+static const char resp_approved_0[] = "HTTP/1.1 200 OK\r\nContent-Length:17\r\n\r\n{\"approved\":true}";
+static const char resp_approved_02[] = "HTTP/1.1 200 OK\r\nContent-Length:17\r\n\r\n{\"approved\":true}";
+static const char resp_approved_04[] = "HTTP/1.1 200 OK\r\nContent-Length:17\r\n\r\n{\"approved\":true}";
+static const char resp_rejected_06[] = "HTTP/1.1 200 OK\r\nContent-Length:18\r\n\r\n{\"approved\":false}";
+static const char resp_rejected_08[] = "HTTP/1.1 200 OK\r\nContent-Length:18\r\n\r\n{\"approved\":false}";
+static const char resp_rejected_1[] = "HTTP/1.1 200 OK\r\nContent-Length:18\r\n\r\n{\"approved\":false}";
 
 static int env_enabled(const char *name, int fallback) {
     const char *value = getenv(name);

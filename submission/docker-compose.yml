@@ -60,7 +60,7 @@ services:
       SEARCH_FALLBACK_LAST_DISTANCE: "2900"
       FAST_PATH: "false"
     ports:
-      - "9999:9999"
+      - "${HOST_PORT:-9999}:9999"
     ulimits:
       nofile:
         soft: 65535
