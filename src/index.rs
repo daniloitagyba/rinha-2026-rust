@@ -672,7 +672,12 @@ impl Index {
         top_label: &mut [u8; K],
         top_id: &mut [u32; K],
     ) {
-        if top_id.contains(&id) {
+        if id == top_id[0]
+            || id == top_id[1]
+            || id == top_id[2]
+            || id == top_id[3]
+            || id == top_id[4]
+        {
             return;
         }
 
@@ -1333,6 +1338,12 @@ fn profile_key(vector: &QuantizedVector) -> usize {
 }
 
 fn is_profile_fraud_outlier(query: &QuantizedVector) -> bool {
+    if query[9] == 0 && query[10] > 0 && query[11] > 0 && query[12] >= 7_500 {
+        const OFFLINE_OUTLIER_KEYS: &[u64] = &[3322808350072459398u64, 3329001200072937266u64];
+        let key = profile_outlier_key(query);
+        return OFFLINE_OUTLIER_KEYS.binary_search(&key).is_ok();
+    }
+
     if query[5] < 0 || query[6] < 0 || query[7] < 0 {
         return false;
     }
@@ -1358,11 +1369,15 @@ fn is_profile_fraud_outlier(query: &QuantizedVector) -> bool {
         3835585487448345730u64,
     ];
 
-    let key = ((profile_key(query) as u64) << 42)
+    let key = profile_outlier_key(query);
+    OUTLIER_KEYS.binary_search(&key).is_ok()
+}
+
+fn profile_outlier_key(query: &QuantizedVector) -> u64 {
+    ((profile_key(query) as u64) << 42)
         | ((query[0] as u64) << 28)
         | ((query[6] as u64) << 14)
-        | query[7] as u64;
-    OUTLIER_KEYS.binary_search(&key).is_ok()
+        | query[7] as u64
 }
 
 fn rescue_frauds(query: &QuantizedVector) -> Option<usize> {

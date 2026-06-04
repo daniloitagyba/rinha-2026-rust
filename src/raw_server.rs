@@ -305,12 +305,13 @@ pub fn serve_tcp_epoll(
         idle_us: env_usize("FD_EPOLL_IDLE_US", 0),
     };
     let accept_batch = env_usize("TCP_ACCEPT_BATCH", 64);
+    let tcp_client_setup = env_bool("TCP_CLIENT_SETUP", true);
     let conn_pool_cap = env_usize("FD_CONN_POOL_CAP", 512);
     let mut events = vec![empty_event(); MAX_EVENTS];
     let mut clients = ConnTable::new(conn_pool_cap);
 
     eprintln!(
-        "tcp epoll raw enabled, bind={bind_addr}, timeout_ms={}, spin_us={}, idle_us={}, busy_poll_us={}, busy_poll_budget={}, prefer_busy_poll={}, accept_batch={accept_batch}, conn_pool_cap={conn_pool_cap}",
+        "tcp epoll raw enabled, bind={bind_addr}, timeout_ms={}, spin_us={}, idle_us={}, busy_poll_us={}, busy_poll_budget={}, prefer_busy_poll={}, accept_batch={accept_batch}, tcp_client_setup={tcp_client_setup}, conn_pool_cap={conn_pool_cap}",
         wait.timeout_ms,
         wait.spin_us,
         wait.idle_us,
@@ -337,6 +338,7 @@ pub fn serve_tcp_epoll(
                     &params,
                     &load,
                     keep_alive_requests,
+                    tcp_client_setup,
                 )?;
                 continue;
             }
@@ -410,6 +412,7 @@ fn accept_tcp_clients(
     params: &SearchParams,
     load: &AtomicUsize,
     keep_alive_requests: usize,
+    tcp_client_setup: bool,
 ) -> Result<(), String> {
     for _ in 0..accept_batch {
         let fd = unsafe {
@@ -431,7 +434,7 @@ fn accept_tcp_clients(
             return Err(format!("tcp accept error: {err}"));
         }
 
-        configure_tcp_client(fd);
+        configure_tcp_client(fd, tcp_client_setup);
         if !clients.insert(fd, &[]) {
             close_fd(fd);
             continue;
@@ -801,8 +804,8 @@ fn configure_tcp_listener(fd: RawFd) {
     }
 }
 
-fn configure_tcp_client(fd: RawFd) {
-    if !env_bool("TCP_CLIENT_SETUP", true) {
+fn configure_tcp_client(fd: RawFd, enabled: bool) {
+    if !enabled {
         return;
     }
 

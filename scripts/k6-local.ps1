@@ -37,6 +37,13 @@ param(
     [string]$RiskyMerchantAvgMax = $env:RISKY_MERCHANT_AVG_MAX,
     [string]$FastPath = $env:FAST_PATH,
     [string]$FdEpollRaw = $env:FD_EPOLL_RAW,
+    [string]$TcpClientSetup = $env:TCP_CLIENT_SETUP,
+    [string]$TcpAcceptBatch = $env:TCP_ACCEPT_BATCH,
+    [string]$TcpDeferAccept = $env:TCP_DEFER_ACCEPT,
+    [string]$FdEpollTimeoutMs = $env:FD_EPOLL_TIMEOUT_MS,
+    [string]$FdEpollSpinUs = $env:FD_EPOLL_SPIN_US,
+    [string]$FdEpollIdleUs = $env:FD_EPOLL_IDLE_US,
+    [string]$FdConnPoolCap = $env:FD_CONN_POOL_CAP,
     [string]$Workers = $env:WORKERS,
     [string]$ApiCpu = $env:API_CPU,
     [string]$ApiMemory = $env:API_MEMORY,
@@ -132,6 +139,17 @@ if (([string]::IsNullOrWhiteSpace($ProfileFastPathReferenceSha256) -or [string]:
 }
 
 $overrideFile = $null
+$lbOverrides = [ordered]@{
+    "TCP_CLIENT_SETUP" = $TcpClientSetup
+    "TCP_ACCEPT_BATCH" = $TcpAcceptBatch
+    "TCP_DEFER_ACCEPT" = $TcpDeferAccept
+    "TCP_EPOLL_RAW" = $FdEpollRaw
+    "FD_EPOLL_TIMEOUT_MS" = $FdEpollTimeoutMs
+    "FD_EPOLL_SPIN_US" = $FdEpollSpinUs
+    "FD_EPOLL_IDLE_US" = $FdEpollIdleUs
+    "FD_CONN_POOL_CAP" = $FdConnPoolCap
+}
+
 $apiOverrides = [ordered]@{
     "EARLY_CANDIDATES" = $EarlyCandidates
     "MIN_CANDIDATES" = $MinCandidates
@@ -164,8 +182,14 @@ $apiOverrides = [ordered]@{
     "RISKY_MERCHANT_AVG_MIN" = $RiskyMerchantAvgMin
     "RISKY_MERCHANT_AVG_MAX" = $RiskyMerchantAvgMax
     "FAST_PATH" = $FastPath
-    "FD_EPOLL_RAW" = $FdEpollRaw
     "WORKERS" = $Workers
+}
+
+$activeLbOverrides = @()
+foreach ($item in $lbOverrides.GetEnumerator()) {
+    if (-not [string]::IsNullOrWhiteSpace($item.Value)) {
+        $activeLbOverrides += $item
+    }
 }
 
 $activeApiOverrides = @()
@@ -187,13 +211,20 @@ $hasCpusetOverrides =
     -not [string]::IsNullOrWhiteSpace($Api2Cpuset) -or
     -not [string]::IsNullOrWhiteSpace($LbCpuset)
 
-if ($activeApiOverrides.Count -gt 0 -or $hasResourceOverrides -or $hasCpusetOverrides) {
+if ($activeLbOverrides.Count -gt 0 -or $activeApiOverrides.Count -gt 0 -or $hasResourceOverrides -or $hasCpusetOverrides) {
     $overrideFile = Join-Path ([System.IO.Path]::GetTempPath()) "$ProjectName.override.yml"
     $lines = @("services:")
-    if (-not [string]::IsNullOrWhiteSpace($LbCpu) -or -not [string]::IsNullOrWhiteSpace($LbMemory) -or -not [string]::IsNullOrWhiteSpace($LbCpuset)) {
+    if ($activeLbOverrides.Count -gt 0 -or -not [string]::IsNullOrWhiteSpace($LbCpu) -or -not [string]::IsNullOrWhiteSpace($LbMemory) -or -not [string]::IsNullOrWhiteSpace($LbCpuset)) {
         $lines += "  lb:"
         if (-not [string]::IsNullOrWhiteSpace($LbCpuset)) {
             $lines += "    cpuset: `"$LbCpuset`""
+        }
+
+        if ($activeLbOverrides.Count -gt 0) {
+            $lines += "    environment:"
+            foreach ($item in $activeLbOverrides) {
+                $lines += "      $($item.Key): `"$($item.Value)`""
+            }
         }
 
         if (-not [string]::IsNullOrWhiteSpace($LbCpu) -or -not [string]::IsNullOrWhiteSpace($LbMemory)) {

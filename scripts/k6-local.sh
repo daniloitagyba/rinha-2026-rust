@@ -117,6 +117,14 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [ -n "${EARLY_CANDIDATES:-}" ] || \
+   [ -n "${TCP_CLIENT_SETUP:-}" ] || \
+   [ -n "${TCP_ACCEPT_BATCH:-}" ] || \
+   [ -n "${TCP_DEFER_ACCEPT:-}" ] || \
+   [ -n "${FD_EPOLL_RAW:-}" ] || \
+   [ -n "${FD_EPOLL_TIMEOUT_MS:-}" ] || \
+   [ -n "${FD_EPOLL_SPIN_US:-}" ] || \
+   [ -n "${FD_EPOLL_IDLE_US:-}" ] || \
+   [ -n "${FD_CONN_POOL_CAP:-}" ] || \
    [ -n "${MIN_CANDIDATES:-}" ] || \
    [ -n "${MAX_CANDIDATES:-}" ] || \
    [ -n "${PROFILE_FASTPATH:-}" ] || \
@@ -158,9 +166,29 @@ if [ -n "${EARLY_CANDIDATES:-}" ] || \
   OVERRIDE_FILE="${OVERRIDE_FILE_PATH:-${TMPDIR:-/tmp}/${PROJECT_NAME}.override.yml}"
   {
     echo "services:"
-    if [ -n "${LB_CPU:-}" ] || [ -n "${LB_MEMORY:-}" ] || [ -n "${LB_CPUSET:-}" ]; then
+    if [ -n "${LB_CPU:-}" ] || [ -n "${LB_MEMORY:-}" ] || [ -n "${LB_CPUSET:-}" ] || \
+       [ -n "${TCP_CLIENT_SETUP:-}" ] || [ -n "${TCP_ACCEPT_BATCH:-}" ] || \
+       [ -n "${TCP_DEFER_ACCEPT:-}" ] || [ -n "${FD_EPOLL_RAW:-}" ] || \
+       [ -n "${FD_EPOLL_TIMEOUT_MS:-}" ] || \
+       [ -n "${FD_EPOLL_SPIN_US:-}" ] || [ -n "${FD_EPOLL_IDLE_US:-}" ] || \
+       [ -n "${FD_CONN_POOL_CAP:-}" ]; then
       echo "  lb:"
       [ -n "${LB_CPUSET:-}" ] && echo "    cpuset: \"$LB_CPUSET\""
+      if [ -n "${TCP_CLIENT_SETUP:-}" ] || [ -n "${TCP_ACCEPT_BATCH:-}" ] || \
+         [ -n "${TCP_DEFER_ACCEPT:-}" ] || [ -n "${FD_EPOLL_RAW:-}" ] || \
+         [ -n "${FD_EPOLL_TIMEOUT_MS:-}" ] || \
+         [ -n "${FD_EPOLL_SPIN_US:-}" ] || [ -n "${FD_EPOLL_IDLE_US:-}" ] || \
+         [ -n "${FD_CONN_POOL_CAP:-}" ]; then
+        echo "    environment:"
+        [ -n "${TCP_CLIENT_SETUP:-}" ] && echo "      TCP_CLIENT_SETUP: \"$TCP_CLIENT_SETUP\""
+        [ -n "${TCP_ACCEPT_BATCH:-}" ] && echo "      TCP_ACCEPT_BATCH: \"$TCP_ACCEPT_BATCH\""
+        [ -n "${TCP_DEFER_ACCEPT:-}" ] && echo "      TCP_DEFER_ACCEPT: \"$TCP_DEFER_ACCEPT\""
+        [ -n "${FD_EPOLL_RAW:-}" ] && echo "      TCP_EPOLL_RAW: \"$FD_EPOLL_RAW\""
+        [ -n "${FD_EPOLL_TIMEOUT_MS:-}" ] && echo "      FD_EPOLL_TIMEOUT_MS: \"$FD_EPOLL_TIMEOUT_MS\""
+        [ -n "${FD_EPOLL_SPIN_US:-}" ] && echo "      FD_EPOLL_SPIN_US: \"$FD_EPOLL_SPIN_US\""
+        [ -n "${FD_EPOLL_IDLE_US:-}" ] && echo "      FD_EPOLL_IDLE_US: \"$FD_EPOLL_IDLE_US\""
+        [ -n "${FD_CONN_POOL_CAP:-}" ] && echo "      FD_CONN_POOL_CAP: \"$FD_CONN_POOL_CAP\""
+      fi
       if [ -n "${LB_CPU:-}" ] || [ -n "${LB_MEMORY:-}" ]; then
         echo "    deploy:"
         echo "      resources:"
