@@ -82,7 +82,7 @@ pub fn serve() -> Result<(), String> {
     let load = Arc::new(AtomicUsize::new(0));
 
     eprintln!(
-        "serving on {bind_addr}, index={index_path}, references_gzip_sha256={}, references_json_sha256={}, profile_fastpaths_allowed={}, workers={workers}, keep_alive_requests={keep_alive_requests}, accept=manual-http1, fd_epoll_raw={fd_epoll_raw}, early_candidates={}, min_candidates={}, max_candidates={}, profile_fastpath={}, profile_min_count={}, profile_legit_min_count={}, profile_fraud_min_count={}, profile_dominant_fastpath={}, profile_dominant_min_count={}, profile_dominant_max_opposite={}, early_edge_fallback={}, exact_fallback={}, profile_exact_triggers={}, risky_fallback_refs={}, risky_semantic_groups={}, risky_semantic_radius={}, overload_min_candidates={}, overload_max_candidates={}, overload_threshold={}, overload_fast_only={}, search_fallback_last_distance={}, flat={}, fast_path={}, fast_only={}",
+        "serving on {bind_addr}, index={index_path}, references_gzip_sha256={}, references_json_sha256={}, profile_fastpaths_allowed={}, workers={workers}, keep_alive_requests={keep_alive_requests}, accept=manual-http1, fd_epoll_raw={fd_epoll_raw}, early_candidates={}, min_candidates={}, max_candidates={}, profile_fastpath={}, profile_min_count={}, profile_legit_min_count={}, profile_fraud_min_count={}, profile_dominant_fastpath={}, profile_dominant_min_count={}, profile_dominant_max_opposite={}, early_edge_fallback={}, exact_fallback={}, bucket_exact_fallback={}, selective_bucket_exact={}, bucket_exact_warm_candidates={}, profile_exact_triggers={}, risky_fallback_refs={}, risky_semantic_groups={}, risky_semantic_radius={}, overload_min_candidates={}, overload_max_candidates={}, overload_threshold={}, overload_fast_only={}, search_fallback_last_distance={}, flat={}, fast_path={}, fast_only={}",
         index
             .references_gzip_sha256_hex()
             .unwrap_or_else(|| "none".to_string()),
@@ -102,6 +102,9 @@ pub fn serve() -> Result<(), String> {
         params.profile_dominant_max_opposite,
         params.early_edge_fallback,
         exact_fallback_name(params.exact_fallback),
+        params.bucket_exact_fallback,
+        params.selective_bucket_exact,
+        params.bucket_exact_warm_candidates,
         params.profile_exact_triggers,
         index.risky_fallback_count(),
         params.risky_semantic_groups,

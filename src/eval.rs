@@ -7,6 +7,8 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::time::Instant;
 
+const KIND_COUNT: usize = 6;
+
 pub fn run(input: &str) -> Result<(), String> {
     let index_path = env::var("INDEX_PATH").unwrap_or_else(|_| "data/references.idx".to_string());
     let limit = env_usize("EVAL_LIMIT", usize::MAX);
@@ -25,7 +27,8 @@ pub fn run(input: &str) -> Result<(), String> {
     let mut fp = 0usize;
     let mut fn_ = 0usize;
     let mut parse_errors = 0usize;
-    let mut kind_counts = [0usize; 5];
+    let mut kind_counts = [0usize; KIND_COUNT];
+    let mut kind_latencies_ns: [Vec<u128>; KIND_COUNT] = std::array::from_fn(|_| Vec::new());
     let mut fraud_count_buckets = [0usize; K + 1];
     let mut latencies_ns = Vec::new();
     let started = Instant::now();
@@ -53,8 +56,11 @@ pub fn run(input: &str) -> Result<(), String> {
                 let query = vectorize(&payload);
                 let (approved, score, kind) = index.classify_detailed(&query, &params);
                 let fraud_count = fraud_count_from_score(score);
-                latencies_ns.push(item_started.elapsed().as_nanos());
-                kind_counts[kind_index(kind)] += 1;
+                let elapsed_ns = item_started.elapsed().as_nanos();
+                let kind_idx = kind_index(kind);
+                latencies_ns.push(elapsed_ns);
+                kind_counts[kind_idx] += 1;
+                kind_latencies_ns[kind_idx].push(elapsed_ns);
                 fraud_count_buckets[fraud_count] += 1;
 
                 if approved == expected {
@@ -152,7 +158,7 @@ pub fn run(input: &str) -> Result<(), String> {
     );
     println!("risky_fallback_refs={}", index.risky_fallback_count());
     println!(
-        "params early_candidates={} min_candidates={} max_candidates={} profile_fastpath={} profile_min_count={} profile_legit_min_count={} profile_fraud_min_count={} profile_dominant_fastpath={} profile_dominant_min_count={} profile_dominant_max_opposite={} early_edge_fallback={} exact_fallback={} profile_exact_triggers={} risky_semantic_groups={} risky_semantic_radius={} overload_min_candidates={} overload_max_candidates={} overload_threshold={} overload_fast_only={} search_fallback_last_distance={} flat={} fast_path={} fast_only={}",
+        "params early_candidates={} min_candidates={} max_candidates={} profile_fastpath={} profile_min_count={} profile_legit_min_count={} profile_fraud_min_count={} profile_dominant_fastpath={} profile_dominant_min_count={} profile_dominant_max_opposite={} early_edge_fallback={} exact_fallback={} bucket_exact_fallback={} selective_bucket_exact={} bucket_exact_warm_candidates={} profile_exact_triggers={} risky_semantic_groups={} risky_semantic_radius={} overload_min_candidates={} overload_max_candidates={} overload_threshold={} overload_fast_only={} search_fallback_last_distance={} flat={} fast_path={} fast_only={}",
         params.early_candidates,
         params.min_candidates,
         params.max_candidates,
@@ -165,6 +171,9 @@ pub fn run(input: &str) -> Result<(), String> {
         params.profile_dominant_max_opposite,
         params.early_edge_fallback,
         exact_fallback_name(params.exact_fallback),
+        params.bucket_exact_fallback,
+        params.selective_bucket_exact,
+        params.bucket_exact_warm_candidates,
         params.profile_exact_triggers,
         params.risky_semantic_groups,
         params.risky_semantic_radius,
@@ -187,9 +196,23 @@ pub fn run(input: &str) -> Result<(), String> {
     );
     println!("classify_latency_ns p50={p50} p95={p95} p99={p99}");
     println!(
-        "decision_counts profile_fast={} rule_fast={} approx={} exact_flat={} exact_risky={}",
-        kind_counts[0], kind_counts[1], kind_counts[2], kind_counts[3], kind_counts[4]
+        "decision_counts profile_fast={} rule_fast={} approx={} exact_flat={} exact_risky_flat={} exact_risky_bucket={}",
+        kind_counts[0], kind_counts[1], kind_counts[2], kind_counts[3], kind_counts[4], kind_counts[5]
     );
+    for (idx, values) in kind_latencies_ns.iter_mut().enumerate() {
+        if values.is_empty() {
+            continue;
+        }
+        values.sort_unstable();
+        println!(
+            "decision_latency_ns {} count={} p50={} p95={} p99={}",
+            kind_name(idx),
+            values.len(),
+            percentile(values, 0.50),
+            percentile(values, 0.95),
+            percentile(values, 0.99)
+        );
+    }
     println!(
         "fraud_count_buckets 0={} 1={} 2={} 3={} 4={} 5={}",
         fraud_count_buckets[0],
@@ -309,7 +332,20 @@ fn kind_index(kind: DecisionKind) -> usize {
         DecisionKind::RuleFast => 1,
         DecisionKind::Approx => 2,
         DecisionKind::ExactFlat => 3,
-        DecisionKind::ExactRisky => 4,
+        DecisionKind::ExactRiskyFlat => 4,
+        DecisionKind::ExactRiskyBucket => 5,
+    }
+}
+
+fn kind_name(idx: usize) -> &'static str {
+    match idx {
+        0 => "profile_fast",
+        1 => "rule_fast",
+        2 => "approx",
+        3 => "exact_flat",
+        4 => "exact_risky_flat",
+        5 => "exact_risky_bucket",
+        _ => "unknown",
     }
 }
 

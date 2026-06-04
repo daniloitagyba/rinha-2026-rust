@@ -129,6 +129,9 @@ if [ -n "${EARLY_CANDIDATES:-}" ] || \
    [ -n "${PROFILE_DOMINANT_MIN_COUNT:-}" ] || \
    [ -n "${PROFILE_DOMINANT_MAX_OPPOSITE:-}" ] || \
    [ -n "${EXACT_FALLBACK:-}" ] || \
+   [ -n "${BUCKET_EXACT_FALLBACK:-}" ] || \
+   [ -n "${SELECTIVE_BUCKET_EXACT:-}" ] || \
+   [ -n "${BUCKET_EXACT_WARM_CANDIDATES:-}" ] || \
    [ -n "${EARLY_EDGE_FALLBACK:-}" ] || \
    [ -n "${RISKY_AMOUNT_MIN:-}" ] || \
    [ -n "${RISKY_AMOUNT_MAX:-}" ] || \
@@ -191,6 +194,9 @@ if [ -n "${EARLY_CANDIDATES:-}" ] || \
          [ -n "${PROFILE_DOMINANT_MIN_COUNT:-}" ] || \
          [ -n "${PROFILE_DOMINANT_MAX_OPPOSITE:-}" ] || \
          [ -n "${EXACT_FALLBACK:-}" ] || \
+         [ -n "${BUCKET_EXACT_FALLBACK:-}" ] || \
+         [ -n "${SELECTIVE_BUCKET_EXACT:-}" ] || \
+         [ -n "${BUCKET_EXACT_WARM_CANDIDATES:-}" ] || \
          [ -n "${EARLY_EDGE_FALLBACK:-}" ] || \
          [ -n "${RISKY_AMOUNT_MIN:-}" ] || \
          [ -n "${RISKY_AMOUNT_MAX:-}" ] || \
@@ -220,6 +226,9 @@ if [ -n "${EARLY_CANDIDATES:-}" ] || \
         [ -n "${PROFILE_DOMINANT_MIN_COUNT:-}" ] && echo "      PROFILE_DOMINANT_MIN_COUNT: \"$PROFILE_DOMINANT_MIN_COUNT\""
         [ -n "${PROFILE_DOMINANT_MAX_OPPOSITE:-}" ] && echo "      PROFILE_DOMINANT_MAX_OPPOSITE: \"$PROFILE_DOMINANT_MAX_OPPOSITE\""
         [ -n "${EXACT_FALLBACK:-}" ] && echo "      EXACT_FALLBACK: \"$EXACT_FALLBACK\""
+        [ -n "${BUCKET_EXACT_FALLBACK:-}" ] && echo "      BUCKET_EXACT_FALLBACK: \"$BUCKET_EXACT_FALLBACK\""
+        [ -n "${SELECTIVE_BUCKET_EXACT:-}" ] && echo "      SELECTIVE_BUCKET_EXACT: \"$SELECTIVE_BUCKET_EXACT\""
+        [ -n "${BUCKET_EXACT_WARM_CANDIDATES:-}" ] && echo "      BUCKET_EXACT_WARM_CANDIDATES: \"$BUCKET_EXACT_WARM_CANDIDATES\""
         [ -n "${EARLY_EDGE_FALLBACK:-}" ] && echo "      EARLY_EDGE_FALLBACK: \"$EARLY_EDGE_FALLBACK\""
         [ -n "${RISKY_AMOUNT_MIN:-}" ] && echo "      RISKY_AMOUNT_MIN: \"$RISKY_AMOUNT_MIN\""
         [ -n "${RISKY_AMOUNT_MAX:-}" ] && echo "      RISKY_AMOUNT_MAX: \"$RISKY_AMOUNT_MAX\""

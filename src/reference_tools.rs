@@ -129,7 +129,7 @@ pub fn eval_references(input: &str) -> Result<(), String> {
     let mut correct = 0usize;
     let mut fp = 0usize;
     let mut fn_ = 0usize;
-    let mut kind_counts = [0usize; 5];
+    let mut kind_counts = [0usize; 6];
     let mut fraud_count_buckets = [0usize; K + 1];
     let mut latencies_ns = Vec::new();
     let started = Instant::now();
@@ -262,8 +262,8 @@ pub fn eval_references(input: &str) -> Result<(), String> {
     );
     println!("classify_latency_ns p50={p50} p95={p95} p99={p99}");
     println!(
-        "decision_counts profile_fast={} rule_fast={} approx={} exact_flat={} exact_risky={}",
-        kind_counts[0], kind_counts[1], kind_counts[2], kind_counts[3], kind_counts[4]
+        "decision_counts profile_fast={} rule_fast={} approx={} exact_flat={} exact_risky_flat={} exact_risky_bucket={}",
+        kind_counts[0], kind_counts[1], kind_counts[2], kind_counts[3], kind_counts[4], kind_counts[5]
     );
     println!(
         "fraud_count_buckets 0={} 1={} 2={} 3={} 4={} 5={}",
@@ -467,7 +467,8 @@ fn kind_index(kind: DecisionKind) -> usize {
         DecisionKind::RuleFast => 1,
         DecisionKind::Approx => 2,
         DecisionKind::ExactFlat => 3,
-        DecisionKind::ExactRisky => 4,
+        DecisionKind::ExactRiskyFlat => 4,
+        DecisionKind::ExactRiskyBucket => 5,
     }
 }
 
