@@ -1,7 +1,7 @@
 # Teste remoto
 
-O disparo do teste remoto segue o mesmo padrao usado no projeto .NET: abrir uma
-issue no repositorio oficial com titulo e corpo `rinha/test <submission>`.
+O disparo do teste remoto abre uma issue no repositorio oficial com titulo e
+corpo `rinha/test <submission>`.
 
 Neste projeto, o nome da submissao e:
 
@@ -31,13 +31,5 @@ resultado depois.
 ## Aguardar uma issue existente
 
 ```powershell
-.\scripts\request-remote-test.ps1 -NoCreate -IssueUrl https://github.com/zanfranceschi/rinha-de-backend-2026/issues/8279
-```
-
-## Issue atual
-
-Ultima issue remota solicitada para comparar com o baseline local:
-
-```txt
-https://github.com/zanfranceschi/rinha-de-backend-2026/issues/8279
+.\scripts\request-remote-test.ps1 -NoCreate -IssueUrl https://github.com/zanfranceschi/rinha-de-backend-2026/issues/<numero-da-issue>
 ```

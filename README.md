@@ -8,7 +8,8 @@ latencia no caminho HTTP oficial e deteccao sem erros no dataset local.
 - API em Rust.
 - Load balancer em C com fd-passing para duas instancias da API.
 - Servidor HTTP/1.1 raw com `epoll` nas APIs.
-- Indice vetorial customizado em `mmap`, com vetores quantizados `int16`.
+- Indice vetorial customizado em `mmap`, com buckets, vetores quantizados
+  `int16` e fallback exato seletivo.
 - Compose de submissao em `linux/amd64`.
 
 ## Arquitetura
@@ -43,14 +44,6 @@ scripts/smoke-compose.sh
 
 Benchmark local mais proximo do remoto deve rodar no WSL com Docker Engine
 nativo. O fluxo detalhado esta em [`LOCAL_TEST_WSL.md`](LOCAL_TEST_WSL.md).
-
-Comando usado para validar a topologia principal:
-
-```sh
-MODE=build PROJECT_NAME=rinha-rust-local API_CPU=0.40 API_MEMORY=162MB \
-LB_CPU=0.20 LB_MEMORY=20MB API1_CPUSET=0 API2_CPUSET=1 LB_CPUSET=2,3 \
-./scripts/k6-local.sh
-```
 
 ## Validacao
 
