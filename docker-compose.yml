@@ -1,6 +1,6 @@
 services:
   lb:
-    image: ghcr.io/daniloitagyba/rinha-2026-rust:8a0812c04d6b370d658d0191766eee0e01f4ac61
+    image: ghcr.io/daniloitagyba/rinha-2026-rust:5660f1a028ba634e1af4423b84801aa5c5e98685
     platform: linux/amd64
     cpuset: "0,1,2,3"
     entrypoint: ["/entrypoint.sh"]
@@ -78,7 +78,7 @@ services:
           memory: "320MB"
 
   api1:
-    image: ghcr.io/daniloitagyba/rinha-2026-rust:8a0812c04d6b370d658d0191766eee0e01f4ac61
+    image: ghcr.io/daniloitagyba/rinha-2026-rust:5660f1a028ba634e1af4423b84801aa5c5e98685
     platform: linux/amd64
     cpuset: "0"
     entrypoint: ["sh", "-c", "sleep infinity"]
@@ -89,7 +89,7 @@ services:
           memory: "12MB"
 
   api2:
-    image: ghcr.io/daniloitagyba/rinha-2026-rust:8a0812c04d6b370d658d0191766eee0e01f4ac61
+    image: ghcr.io/daniloitagyba/rinha-2026-rust:5660f1a028ba634e1af4423b84801aa5c5e98685
     platform: linux/amd64
     cpuset: "2"
     entrypoint: ["sh", "-c", "sleep infinity"]
