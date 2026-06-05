@@ -1,5 +1,4 @@
 target
 .git
 data/*
-test/test-data.json
-test/results*.json
+test/*

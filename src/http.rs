@@ -26,14 +26,13 @@ use tokio::net::UnixListener;
 use tokio::runtime::{Builder, Handle};
 
 const MAX_REQUEST_BYTES: usize = 32 * 1024;
-pub(crate) const RX_CAP: usize = 64 * 1024;
+pub(crate) const RX_CAP: usize = 8 * 1024;
 const MAX_BATCHED_RESPONSES: usize = 16;
 
 const RESP_APPROVED_0: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length:17\r\n\r\n{\"approved\":true}";
 const RESP_APPROVED_02: &[u8] = RESP_APPROVED_0;
 const RESP_APPROVED_04: &[u8] = RESP_APPROVED_0;
-const RESP_REJECTED_06: &[u8] =
-    b"HTTP/1.1 200 OK\r\nContent-Length:18\r\n\r\n{\"approved\":false}";
+const RESP_REJECTED_06: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length:18\r\n\r\n{\"approved\":false}";
 const RESP_REJECTED_08: &[u8] = RESP_REJECTED_06;
 const RESP_REJECTED_1: &[u8] = RESP_REJECTED_06;
 pub(crate) const RESP_READY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length:0\r\n\r\n";

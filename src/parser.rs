@@ -16,6 +16,113 @@ pub struct Payload<'a> {
 }
 
 pub fn parse_payload(body: &[u8]) -> Result<Payload<'_>, &'static str> {
+    if let Some(payload) = parse_payload_ordered(body) {
+        return Ok(payload);
+    }
+    parse_payload_scan(body)
+}
+
+fn parse_payload_ordered(body: &[u8]) -> Option<Payload<'_>> {
+    let mut pos = 0usize;
+
+    consume_byte(body, &mut pos, b'{')?;
+    consume_key(body, &mut pos, b"\"id\"")?;
+    skip_json_string(body, &mut pos)?;
+    consume_comma(body, &mut pos)?;
+
+    consume_key(body, &mut pos, b"\"transaction\"")?;
+    consume_byte(body, &mut pos, b'{')?;
+    consume_key(body, &mut pos, b"\"amount\"")?;
+    let amount = read_number(body, &mut pos)?;
+    consume_comma(body, &mut pos)?;
+    consume_key(body, &mut pos, b"\"installments\"")?;
+    let installments = read_number(body, &mut pos)?;
+    consume_comma(body, &mut pos)?;
+    consume_key(body, &mut pos, b"\"requested_at\"")?;
+    let requested_at = read_string(body, &mut pos)?;
+    consume_byte(body, &mut pos, b'}')?;
+    consume_comma(body, &mut pos)?;
+
+    consume_key(body, &mut pos, b"\"customer\"")?;
+    consume_byte(body, &mut pos, b'{')?;
+    consume_key(body, &mut pos, b"\"avg_amount\"")?;
+    let customer_avg_amount = read_number(body, &mut pos)?;
+    consume_comma(body, &mut pos)?;
+    consume_key(body, &mut pos, b"\"tx_count_24h\"")?;
+    let tx_count_24h = read_number(body, &mut pos)?;
+    consume_comma(body, &mut pos)?;
+    consume_key(body, &mut pos, b"\"known_merchants\"")?;
+    let known_merchants = read_array(body, &mut pos)?;
+    consume_byte(body, &mut pos, b'}')?;
+    consume_comma(body, &mut pos)?;
+
+    consume_key(body, &mut pos, b"\"merchant\"")?;
+    consume_byte(body, &mut pos, b'{')?;
+    consume_key(body, &mut pos, b"\"id\"")?;
+    let merchant_id = read_string(body, &mut pos)?;
+    consume_comma(body, &mut pos)?;
+    consume_key(body, &mut pos, b"\"mcc\"")?;
+    let mcc = read_string(body, &mut pos)?;
+    consume_comma(body, &mut pos)?;
+    consume_key(body, &mut pos, b"\"avg_amount\"")?;
+    let merchant_avg_amount = read_number(body, &mut pos)?;
+    consume_byte(body, &mut pos, b'}')?;
+    consume_comma(body, &mut pos)?;
+
+    consume_key(body, &mut pos, b"\"terminal\"")?;
+    consume_byte(body, &mut pos, b'{')?;
+    consume_key(body, &mut pos, b"\"is_online\"")?;
+    let is_online = read_bool(body, &mut pos)?;
+    consume_comma(body, &mut pos)?;
+    consume_key(body, &mut pos, b"\"card_present\"")?;
+    let card_present = read_bool(body, &mut pos)?;
+    consume_comma(body, &mut pos)?;
+    consume_key(body, &mut pos, b"\"km_from_home\"")?;
+    let km_from_home = read_number(body, &mut pos)?;
+    consume_byte(body, &mut pos, b'}')?;
+    consume_comma(body, &mut pos)?;
+
+    consume_key(body, &mut pos, b"\"last_transaction\"")?;
+    let pos_after_last_key = skip_ws(body, pos);
+    let (last_timestamp, last_km_from_current) = if body[pos_after_last_key..].starts_with(b"null")
+    {
+        pos = pos_after_last_key + 4;
+        (None, None)
+    } else {
+        consume_byte(body, &mut pos, b'{')?;
+        consume_key(body, &mut pos, b"\"timestamp\"")?;
+        let timestamp = read_string(body, &mut pos)?;
+        consume_comma(body, &mut pos)?;
+        consume_key(body, &mut pos, b"\"km_from_current\"")?;
+        let km = read_number(body, &mut pos)?;
+        consume_byte(body, &mut pos, b'}')?;
+        (Some(timestamp), Some(km))
+    };
+
+    consume_byte(body, &mut pos, b'}')?;
+    if skip_ws(body, pos) != body.len() {
+        return None;
+    }
+
+    Some(Payload {
+        amount,
+        installments,
+        requested_at,
+        customer_avg_amount,
+        tx_count_24h,
+        known_merchants,
+        merchant_id,
+        mcc,
+        merchant_avg_amount,
+        is_online,
+        card_present,
+        km_from_home,
+        last_timestamp,
+        last_km_from_current,
+    })
+}
+
+fn parse_payload_scan(body: &[u8]) -> Result<Payload<'_>, &'static str> {
     let transaction = object_slice(body, b"\"transaction\"").ok_or("missing transaction")?;
     let customer = object_slice(body, b"\"customer\"").ok_or("missing customer")?;
     let merchant = object_slice(body, b"\"merchant\"").ok_or("missing merchant")?;
@@ -54,6 +161,124 @@ pub fn parse_payload(body: &[u8]) -> Result<Payload<'_>, &'static str> {
         last_timestamp,
         last_km_from_current,
     })
+}
+
+fn consume_key(s: &[u8], pos: &mut usize, key: &[u8]) -> Option<()> {
+    *pos = skip_ws(s, *pos);
+    if !s.get(*pos..)?.starts_with(key) {
+        return None;
+    }
+    *pos += key.len();
+    *pos = skip_ws(s, *pos);
+    if s.get(*pos) != Some(&b':') {
+        return None;
+    }
+    *pos += 1;
+    Some(())
+}
+
+fn consume_byte(s: &[u8], pos: &mut usize, expected: u8) -> Option<()> {
+    *pos = skip_ws(s, *pos);
+    if s.get(*pos) != Some(&expected) {
+        return None;
+    }
+    *pos += 1;
+    Some(())
+}
+
+fn consume_comma(s: &[u8], pos: &mut usize) -> Option<()> {
+    consume_byte(s, pos, b',')
+}
+
+fn read_number(s: &[u8], pos: &mut usize) -> Option<f64> {
+    *pos = skip_ws(s, *pos);
+    let start = *pos;
+    while *pos < s.len() {
+        let b = s[*pos];
+        if b.is_ascii_digit() || matches!(b, b'-' | b'+' | b'.' | b'e' | b'E') {
+            *pos += 1;
+        } else {
+            break;
+        }
+    }
+    parse_number(&s[start..*pos])
+}
+
+fn read_string<'a>(s: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
+    *pos = skip_ws(s, *pos);
+    if s.get(*pos) != Some(&b'"') {
+        return None;
+    }
+    *pos += 1;
+    let start = *pos;
+    let mut escaped = false;
+    while *pos < s.len() {
+        let b = s[*pos];
+        if escaped {
+            escaped = false;
+        } else if b == b'\\' {
+            escaped = true;
+        } else if b == b'"' {
+            let out = &s[start..*pos];
+            *pos += 1;
+            return Some(out);
+        }
+        *pos += 1;
+    }
+    None
+}
+
+fn skip_json_string(s: &[u8], pos: &mut usize) -> Option<()> {
+    read_string(s, pos).map(|_| ())
+}
+
+fn read_bool(s: &[u8], pos: &mut usize) -> Option<bool> {
+    *pos = skip_ws(s, *pos);
+    if s.get(*pos..)?.starts_with(b"true") {
+        *pos += 4;
+        Some(true)
+    } else if s.get(*pos..)?.starts_with(b"false") {
+        *pos += 5;
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn read_array<'a>(s: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
+    *pos = skip_ws(s, *pos);
+    if s.get(*pos) != Some(&b'[') {
+        return None;
+    }
+
+    let start = *pos;
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    while *pos < s.len() {
+        let b = s[*pos];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+        } else if b == b'"' {
+            in_string = true;
+        } else if b == b'[' {
+            depth += 1;
+        } else if b == b']' {
+            depth -= 1;
+            if depth == 0 {
+                *pos += 1;
+                return Some(&s[start..*pos]);
+            }
+        }
+        *pos += 1;
+    }
+    None
 }
 
 fn object_slice<'a>(s: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
