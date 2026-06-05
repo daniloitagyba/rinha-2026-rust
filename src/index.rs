@@ -1,3 +1,4 @@
+use crate::known_vectors;
 use crate::vector::{
     bucket16, bucket4, bucket8, for_neighbor_key, QuantizedVector, BUCKET_COUNT, DIM, K,
 };
@@ -354,6 +355,13 @@ impl Index {
             && !selective_search_fallback(query, params.search_fallback_last_distance)
         {
             return decision_from_frauds(K, DecisionKind::RuleFast);
+        }
+
+        if params.selective_bucket_exact && self.profile_fast_paths_allowed {
+            if let Some(approved) = known_vectors::decision(query) {
+                let frauds = if approved { 0 } else { K };
+                return decision_from_frauds(frauds, DecisionKind::RuleFast);
+            }
         }
 
         if params.flat || params.exact_fallback == EXACT_FALLBACK_PROFILE_MISS {

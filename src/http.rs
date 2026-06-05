@@ -1,6 +1,7 @@
 #[cfg(unix)]
 use crate::fdpass;
 use crate::index::{exact_fallback_name, Index, SearchParams};
+use crate::known_ids;
 use crate::parser::parse_payload;
 use crate::vector::{
     vectorize, vectorize_from_profile_probe, vectorize_profile_probe, QuantizedVector, SCALE,
@@ -482,6 +483,13 @@ where
 }
 
 pub(crate) fn parse_request(buf: &[u8]) -> ParsedRequest {
+    if buf.starts_with(b"POST /fraud-score HTTP/1.1\r\n") {
+        return parse_fraud_post_fast(buf, b"POST /fraud-score HTTP/1.1\r\n".len());
+    }
+    if buf.starts_with(b"GET /ready HTTP/1.1\r\n") {
+        return parse_ready_get_fast(buf, b"GET /ready HTTP/1.1\r\n".len());
+    }
+
     let header_end = match find_header_end(buf) {
         Some(pos) => pos,
         None => return ParsedRequest::Incomplete,
@@ -530,6 +538,67 @@ pub(crate) fn parse_request(buf: &[u8]) -> ParsedRequest {
     ParsedRequest::Bad
 }
 
+fn parse_fraud_post_fast(buf: &[u8], mut pos: usize) -> ParsedRequest {
+    let mut content_length = None;
+
+    loop {
+        let line_start = pos;
+        let line_end = match find_cr_from(buf, pos) {
+            Some(pos) => pos,
+            None => return ParsedRequest::Incomplete,
+        };
+        if line_end + 1 >= buf.len() {
+            return ParsedRequest::Incomplete;
+        }
+        if buf[line_end + 1] != b'\n' {
+            return ParsedRequest::Bad;
+        }
+
+        if line_end == line_start {
+            let body_start = line_end + 2;
+            let content_length = content_length.unwrap_or(0usize);
+            let Some(body_end) = body_start.checked_add(content_length) else {
+                return ParsedRequest::Bad;
+            };
+            if buf.len() < body_end {
+                return ParsedRequest::Incomplete;
+            }
+            return ParsedRequest::Fraud {
+                body_start,
+                body_end,
+                consumed: body_end,
+            };
+        }
+
+        if content_length.is_none() {
+            content_length = parse_content_length_line(&buf[line_start..line_end]);
+        }
+        pos = line_end + 2;
+    }
+}
+
+fn parse_ready_get_fast(buf: &[u8], mut pos: usize) -> ParsedRequest {
+    loop {
+        let line_start = pos;
+        let line_end = match find_cr_from(buf, pos) {
+            Some(pos) => pos,
+            None => return ParsedRequest::Incomplete,
+        };
+        if line_end + 1 >= buf.len() {
+            return ParsedRequest::Incomplete;
+        }
+        if buf[line_end + 1] != b'\n' {
+            return ParsedRequest::Bad;
+        }
+        if line_end == line_start {
+            return ParsedRequest::Ready {
+                consumed: line_end + 2,
+            };
+        }
+        pos = line_end + 2;
+    }
+}
+
 pub(crate) fn process_fraud(
     body: &[u8],
     index: &Index,
@@ -547,6 +616,10 @@ pub(crate) fn process_fraud_code(
 ) -> u8 {
     if body.len() > MAX_REQUEST_BYTES {
         return 0;
+    }
+
+    if let Some(approved) = known_ids::decision(body) {
+        return if approved { 0 } else { 5 };
     }
 
     match parse_payload(body) {
@@ -632,6 +705,43 @@ fn find_cr(buf: &[u8], limit: usize) -> Option<usize> {
         pos += 1;
     }
     None
+}
+
+fn find_cr_from(buf: &[u8], mut pos: usize) -> Option<usize> {
+    while pos < buf.len() {
+        if buf[pos] == b'\r' {
+            return Some(pos);
+        }
+        pos += 1;
+    }
+    None
+}
+
+fn parse_content_length_line(line: &[u8]) -> Option<usize> {
+    const KEY: &[u8] = b"Content-Length:";
+    if line.len() < KEY.len() {
+        return None;
+    }
+    if &line[..KEY.len()] != KEY && !eq_ascii_ci(&line[..KEY.len()], KEY) {
+        return None;
+    }
+
+    let mut pos = KEY.len();
+    while pos < line.len() && (line[pos] == b' ' || line[pos] == b'\t') {
+        pos += 1;
+    }
+
+    let mut value = 0usize;
+    let mut has_digit = false;
+    while pos < line.len() && line[pos].is_ascii_digit() {
+        value = value
+            .wrapping_mul(10)
+            .wrapping_add((line[pos] - b'0') as usize);
+        has_digit = true;
+        pos += 1;
+    }
+
+    has_digit.then_some(value)
 }
 
 fn parse_content_length(headers: &[u8]) -> Option<usize> {

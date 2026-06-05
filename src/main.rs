@@ -4,6 +4,8 @@ mod eval;
 mod fdpass;
 mod http;
 mod index;
+mod known_ids;
+mod known_vectors;
 mod parser;
 #[cfg(unix)]
 mod raw_server;
