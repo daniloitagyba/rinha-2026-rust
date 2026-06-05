@@ -2,7 +2,9 @@
 use crate::fdpass;
 use crate::index::{exact_fallback_name, Index, SearchParams};
 use crate::parser::parse_payload;
-use crate::vector::{vectorize, QuantizedVector, SCALE};
+use crate::vector::{
+    vectorize, vectorize_from_profile_probe, vectorize_profile_probe, QuantizedVector, SCALE,
+};
 use std::env;
 #[cfg(unix)]
 use std::fs;
@@ -549,7 +551,20 @@ pub(crate) fn process_fraud_code(
 
     match parse_payload(body) {
         Ok(payload) => {
-            let query = vectorize(&payload);
+            let profile_query = if params.overload_threshold == 0 {
+                let profile_query = vectorize_profile_probe(&payload);
+                if let Some((approved, score)) = index.classify_profile_fast(&profile_query, params)
+                {
+                    return fraud_response_code(approved, score);
+                }
+                Some(profile_query)
+            } else {
+                None
+            };
+
+            let query = profile_query
+                .map(|probe| vectorize_from_profile_probe(&payload, probe))
+                .unwrap_or_else(|| vectorize(&payload));
             let (approved, score) = if params.overload_threshold == 0 {
                 index.classify(&query, params)
             } else {

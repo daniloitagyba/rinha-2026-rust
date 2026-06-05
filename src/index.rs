@@ -252,6 +252,16 @@ impl Index {
         (approved, score)
     }
 
+    pub fn classify_profile_fast(
+        &self,
+        query: &QuantizedVector,
+        params: &SearchParams,
+    ) -> Option<(bool, f32)> {
+        let frauds = self.try_profile_fast_decision(query, params)?;
+        let (approved, score, _) = decision_from_frauds(frauds, DecisionKind::ProfileFast);
+        Some((approved, score))
+    }
+
     pub fn risky_fallback_count(&self) -> usize {
         self.risky_fallback_ids.len()
     }

@@ -43,6 +43,63 @@ pub fn vectorize(payload: &Payload<'_>) -> QuantizedVector {
     })
 }
 
+pub fn vectorize_profile_probe(payload: &Payload<'_>) -> QuantizedVector {
+    let mut out = [0i16; DIM];
+    out[0] = q(clamp01(payload.amount / 10_000.0));
+    out[1] = q(clamp01(payload.installments / 12.0));
+    out[2] = q(clamp01(amount_vs_avg(
+        payload.amount,
+        payload.customer_avg_amount,
+    )));
+    if payload.last_timestamp.is_some() {
+        out[5] = 0;
+        out[6] = q(clamp01(
+            payload.last_km_from_current.unwrap_or(0.0) / 1000.0,
+        ));
+    } else {
+        out[5] = -SCALE as i16;
+        out[6] = -SCALE as i16;
+    }
+    out[7] = q(clamp01(payload.km_from_home / 1000.0));
+    out[8] = q(clamp01(payload.tx_count_24h / 20.0));
+    out[9] = if payload.is_online { SCALE as i16 } else { 0 };
+    out[10] = if payload.card_present {
+        SCALE as i16
+    } else {
+        0
+    };
+    out[11] = if contains_quoted_bytes(payload.known_merchants, payload.merchant_id) {
+        0
+    } else {
+        SCALE as i16
+    };
+    out[12] = q(mcc_risk_bytes(payload.mcc));
+    out[13] = q(clamp01(payload.merchant_avg_amount / 10_000.0));
+    out
+}
+
+pub fn vectorize_from_profile_probe(
+    payload: &Payload<'_>,
+    mut out: QuantizedVector,
+) -> QuantizedVector {
+    let (year, month, day, hour, minute) =
+        parse_time_bytes(payload.requested_at).unwrap_or((2026, 1, 1, 0, 0));
+    let dow = day_of_week(year, month, day);
+    out[3] = q((hour as f64) / 23.0);
+    out[4] = q((dow as f64) / 6.0);
+
+    if let Some(last_timestamp) = payload.last_timestamp {
+        let current = epoch_minutes(year, month, day, hour, minute);
+        let last = parse_time_bytes(last_timestamp)
+            .map(|(y, m, d, h, min)| epoch_minutes(y, m, d, h, min))
+            .unwrap_or(current);
+        let minutes = (current - last).max(0) as f64;
+        out[5] = q(clamp01(minutes / 1440.0));
+    }
+
+    out
+}
+
 pub fn vectorize_input(input: VectorInput<'_>) -> QuantizedVector {
     let (year, month, day, hour, minute) =
         parse_time_bytes(input.requested_at).unwrap_or((2026, 1, 1, 0, 0));
@@ -368,5 +425,18 @@ mod tests {
         assert_eq!(vector[4], 8333);
         assert_eq!(vector[11], 10000);
         assert_eq!(vector[12], 7500);
+    }
+
+    #[test]
+    fn profile_probe_reconstructs_full_vector() {
+        for body in [
+            include_bytes!("../resources/example-payload-legit.json").as_slice(),
+            include_bytes!("../resources/example-payload-fraud.json").as_slice(),
+        ] {
+            let payload = parse_payload(body).unwrap();
+            let full = vectorize(&payload);
+            let probe = vectorize_profile_probe(&payload);
+            assert_eq!(vectorize_from_profile_probe(&payload, probe), full);
+        }
     }
 }
