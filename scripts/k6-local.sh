@@ -7,9 +7,6 @@ MODE="${MODE:-submission}"
 RUNNER_PRESET="${RUNNER_PRESET:-default}"
 PROJECT_NAME="${PROJECT_NAME:-rinha-rust-local}"
 K6_IMAGE="${K6_IMAGE:-grafana/k6:latest}"
-BASE_URL="${BASE_URL:-http://lb:9999}"
-K6_NETWORK_MODE="${K6_NETWORK_MODE:-compose}"
-HOST_PORT="${HOST_PORT:-9999}"
 SUBMISSION_COMPOSE_FILE="${SUBMISSION_COMPOSE_FILE:-}"
 KEEP_SERVICES="${KEEP_SERVICES:-0}"
 REFRESH_DATA="${REFRESH_DATA:-0}"
@@ -37,12 +34,12 @@ case "$RUNNER_PRESET" in
   default)
     ;;
   remote-ryzen)
-    API_CPU="${API_CPU:-0.050}"
-    LB_CPU="${LB_CPU:-0.900}"
+    API_CPU="${API_CPU:-0.300}"
+    LB_CPU="${LB_CPU:-0.110}"
     ;;
   remote-ryzen-hard)
-    API_CPU="${API_CPU:-0.050}"
-    LB_CPU="${LB_CPU:-0.900}"
+    API_CPU="${API_CPU:-0.300}"
+    LB_CPU="${LB_CPU:-0.108}"
     ;;
   *)
     echo "RUNNER_PRESET must be default, remote-ryzen or remote-ryzen-hard" >&2
@@ -120,14 +117,6 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [ -n "${EARLY_CANDIDATES:-}" ] || \
-   [ -n "${TCP_CLIENT_SETUP:-}" ] || \
-   [ -n "${TCP_ACCEPT_BATCH:-}" ] || \
-   [ -n "${TCP_DEFER_ACCEPT:-}" ] || \
-   [ -n "${FD_EPOLL_RAW:-}" ] || \
-   [ -n "${FD_EPOLL_TIMEOUT_MS:-}" ] || \
-   [ -n "${FD_EPOLL_SPIN_US:-}" ] || \
-   [ -n "${FD_EPOLL_IDLE_US:-}" ] || \
-   [ -n "${FD_CONN_POOL_CAP:-}" ] || \
    [ -n "${MIN_CANDIDATES:-}" ] || \
    [ -n "${MAX_CANDIDATES:-}" ] || \
    [ -n "${PROFILE_FASTPATH:-}" ] || \
@@ -140,9 +129,6 @@ if [ -n "${EARLY_CANDIDATES:-}" ] || \
    [ -n "${PROFILE_DOMINANT_MIN_COUNT:-}" ] || \
    [ -n "${PROFILE_DOMINANT_MAX_OPPOSITE:-}" ] || \
    [ -n "${EXACT_FALLBACK:-}" ] || \
-   [ -n "${BUCKET_EXACT_FALLBACK:-}" ] || \
-   [ -n "${SELECTIVE_BUCKET_EXACT:-}" ] || \
-   [ -n "${BUCKET_EXACT_WARM_CANDIDATES:-}" ] || \
    [ -n "${EARLY_EDGE_FALLBACK:-}" ] || \
    [ -n "${RISKY_AMOUNT_MIN:-}" ] || \
    [ -n "${RISKY_AMOUNT_MAX:-}" ] || \
@@ -169,29 +155,9 @@ if [ -n "${EARLY_CANDIDATES:-}" ] || \
   OVERRIDE_FILE="${OVERRIDE_FILE_PATH:-${TMPDIR:-/tmp}/${PROJECT_NAME}.override.yml}"
   {
     echo "services:"
-    if [ -n "${LB_CPU:-}" ] || [ -n "${LB_MEMORY:-}" ] || [ -n "${LB_CPUSET:-}" ] || \
-       [ -n "${TCP_CLIENT_SETUP:-}" ] || [ -n "${TCP_ACCEPT_BATCH:-}" ] || \
-       [ -n "${TCP_DEFER_ACCEPT:-}" ] || [ -n "${FD_EPOLL_RAW:-}" ] || \
-       [ -n "${FD_EPOLL_TIMEOUT_MS:-}" ] || \
-       [ -n "${FD_EPOLL_SPIN_US:-}" ] || [ -n "${FD_EPOLL_IDLE_US:-}" ] || \
-       [ -n "${FD_CONN_POOL_CAP:-}" ]; then
+    if [ -n "${LB_CPU:-}" ] || [ -n "${LB_MEMORY:-}" ] || [ -n "${LB_CPUSET:-}" ]; then
       echo "  lb:"
       [ -n "${LB_CPUSET:-}" ] && echo "    cpuset: \"$LB_CPUSET\""
-      if [ -n "${TCP_CLIENT_SETUP:-}" ] || [ -n "${TCP_ACCEPT_BATCH:-}" ] || \
-         [ -n "${TCP_DEFER_ACCEPT:-}" ] || [ -n "${FD_EPOLL_RAW:-}" ] || \
-         [ -n "${FD_EPOLL_TIMEOUT_MS:-}" ] || \
-         [ -n "${FD_EPOLL_SPIN_US:-}" ] || [ -n "${FD_EPOLL_IDLE_US:-}" ] || \
-         [ -n "${FD_CONN_POOL_CAP:-}" ]; then
-        echo "    environment:"
-        [ -n "${TCP_CLIENT_SETUP:-}" ] && echo "      TCP_CLIENT_SETUP: \"$TCP_CLIENT_SETUP\""
-        [ -n "${TCP_ACCEPT_BATCH:-}" ] && echo "      TCP_ACCEPT_BATCH: \"$TCP_ACCEPT_BATCH\""
-        [ -n "${TCP_DEFER_ACCEPT:-}" ] && echo "      TCP_DEFER_ACCEPT: \"$TCP_DEFER_ACCEPT\""
-        [ -n "${FD_EPOLL_RAW:-}" ] && echo "      TCP_EPOLL_RAW: \"$FD_EPOLL_RAW\""
-        [ -n "${FD_EPOLL_TIMEOUT_MS:-}" ] && echo "      FD_EPOLL_TIMEOUT_MS: \"$FD_EPOLL_TIMEOUT_MS\""
-        [ -n "${FD_EPOLL_SPIN_US:-}" ] && echo "      FD_EPOLL_SPIN_US: \"$FD_EPOLL_SPIN_US\""
-        [ -n "${FD_EPOLL_IDLE_US:-}" ] && echo "      FD_EPOLL_IDLE_US: \"$FD_EPOLL_IDLE_US\""
-        [ -n "${FD_CONN_POOL_CAP:-}" ] && echo "      FD_CONN_POOL_CAP: \"$FD_CONN_POOL_CAP\""
-      fi
       if [ -n "${LB_CPU:-}" ] || [ -n "${LB_MEMORY:-}" ]; then
         echo "    deploy:"
         echo "      resources:"
@@ -225,9 +191,6 @@ if [ -n "${EARLY_CANDIDATES:-}" ] || \
          [ -n "${PROFILE_DOMINANT_MIN_COUNT:-}" ] || \
          [ -n "${PROFILE_DOMINANT_MAX_OPPOSITE:-}" ] || \
          [ -n "${EXACT_FALLBACK:-}" ] || \
-         [ -n "${BUCKET_EXACT_FALLBACK:-}" ] || \
-         [ -n "${SELECTIVE_BUCKET_EXACT:-}" ] || \
-         [ -n "${BUCKET_EXACT_WARM_CANDIDATES:-}" ] || \
          [ -n "${EARLY_EDGE_FALLBACK:-}" ] || \
          [ -n "${RISKY_AMOUNT_MIN:-}" ] || \
          [ -n "${RISKY_AMOUNT_MAX:-}" ] || \
@@ -257,9 +220,6 @@ if [ -n "${EARLY_CANDIDATES:-}" ] || \
         [ -n "${PROFILE_DOMINANT_MIN_COUNT:-}" ] && echo "      PROFILE_DOMINANT_MIN_COUNT: \"$PROFILE_DOMINANT_MIN_COUNT\""
         [ -n "${PROFILE_DOMINANT_MAX_OPPOSITE:-}" ] && echo "      PROFILE_DOMINANT_MAX_OPPOSITE: \"$PROFILE_DOMINANT_MAX_OPPOSITE\""
         [ -n "${EXACT_FALLBACK:-}" ] && echo "      EXACT_FALLBACK: \"$EXACT_FALLBACK\""
-        [ -n "${BUCKET_EXACT_FALLBACK:-}" ] && echo "      BUCKET_EXACT_FALLBACK: \"$BUCKET_EXACT_FALLBACK\""
-        [ -n "${SELECTIVE_BUCKET_EXACT:-}" ] && echo "      SELECTIVE_BUCKET_EXACT: \"$SELECTIVE_BUCKET_EXACT\""
-        [ -n "${BUCKET_EXACT_WARM_CANDIDATES:-}" ] && echo "      BUCKET_EXACT_WARM_CANDIDATES: \"$BUCKET_EXACT_WARM_CANDIDATES\""
         [ -n "${EARLY_EDGE_FALLBACK:-}" ] && echo "      EARLY_EDGE_FALLBACK: \"$EARLY_EDGE_FALLBACK\""
         [ -n "${RISKY_AMOUNT_MIN:-}" ] && echo "      RISKY_AMOUNT_MIN: \"$RISKY_AMOUNT_MIN\""
         [ -n "${RISKY_AMOUNT_MAX:-}" ] && echo "      RISKY_AMOUNT_MAX: \"$RISKY_AMOUNT_MAX\""
@@ -302,7 +262,7 @@ fi
 
 ready=0
 for _ in $(seq 1 90); do
-  if curl -fsS "http://127.0.0.1:$HOST_PORT/ready" >/dev/null 2>&1; then
+  if curl -fsS "http://127.0.0.1:9999/ready" >/dev/null 2>&1; then
     ready=1
     break
   fi
@@ -310,29 +270,13 @@ for _ in $(seq 1 90); do
 done
 
 if [ "$ready" != "1" ]; then
-  echo "backend did not become ready on http://127.0.0.1:$HOST_PORT/ready" >&2
+  echo "backend did not become ready on http://127.0.0.1:9999/ready" >&2
   exit 1
 fi
 
-K6_CPUSET_ARGS=""
-if [ -n "${K6_CPUSET:-}" ]; then
-  K6_CPUSET_ARGS="--cpuset-cpus=$K6_CPUSET"
-fi
-K6_NETWORK_ARGS="--network ${PROJECT_NAME}_default"
-if [ "$K6_NETWORK_MODE" = "host" ]; then
-  K6_NETWORK_ARGS="--network host"
-  if [ "${BASE_URL:-http://lb:9999}" = "http://lb:9999" ]; then
-    BASE_URL="http://127.0.0.1:$HOST_PORT"
-  fi
-elif [ "$K6_NETWORK_MODE" != "compose" ]; then
-  echo "K6_NETWORK_MODE must be compose or host" >&2
-  exit 2
-fi
-
 docker run --rm \
-  $K6_CPUSET_ARGS \
-  $K6_NETWORK_ARGS \
-  -e BASE_URL="$BASE_URL" \
+  --network "${PROJECT_NAME}_default" \
+  -e BASE_URL="http://lb:9999" \
   -e RESULTS_PATH="/scripts/results.json" \
   -e TARGET_RATE \
   -e RAMP_DURATION \

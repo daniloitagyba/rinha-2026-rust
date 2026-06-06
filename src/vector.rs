@@ -43,63 +43,6 @@ pub fn vectorize(payload: &Payload<'_>) -> QuantizedVector {
     })
 }
 
-pub fn vectorize_profile_probe(payload: &Payload<'_>) -> QuantizedVector {
-    let mut out = [0i16; DIM];
-    out[0] = q(clamp01(payload.amount / 10_000.0));
-    out[1] = q(clamp01(payload.installments / 12.0));
-    out[2] = q(clamp01(amount_vs_avg(
-        payload.amount,
-        payload.customer_avg_amount,
-    )));
-    if payload.last_timestamp.is_some() {
-        out[5] = 0;
-        out[6] = q(clamp01(
-            payload.last_km_from_current.unwrap_or(0.0) / 1000.0,
-        ));
-    } else {
-        out[5] = -SCALE as i16;
-        out[6] = -SCALE as i16;
-    }
-    out[7] = q(clamp01(payload.km_from_home / 1000.0));
-    out[8] = q(clamp01(payload.tx_count_24h / 20.0));
-    out[9] = if payload.is_online { SCALE as i16 } else { 0 };
-    out[10] = if payload.card_present {
-        SCALE as i16
-    } else {
-        0
-    };
-    out[11] = if contains_quoted_bytes(payload.known_merchants, payload.merchant_id) {
-        0
-    } else {
-        SCALE as i16
-    };
-    out[12] = q(mcc_risk_bytes(payload.mcc));
-    out[13] = q(clamp01(payload.merchant_avg_amount / 10_000.0));
-    out
-}
-
-pub fn vectorize_from_profile_probe(
-    payload: &Payload<'_>,
-    mut out: QuantizedVector,
-) -> QuantizedVector {
-    let (year, month, day, hour, minute) =
-        parse_time_bytes(payload.requested_at).unwrap_or((2026, 1, 1, 0, 0));
-    let dow = day_of_week(year, month, day);
-    out[3] = q((hour as f64) / 23.0);
-    out[4] = q((dow as f64) / 6.0);
-
-    if let Some(last_timestamp) = payload.last_timestamp {
-        let current = epoch_minutes(year, month, day, hour, minute);
-        let last = parse_time_bytes(last_timestamp)
-            .map(|(y, m, d, h, min)| epoch_minutes(y, m, d, h, min))
-            .unwrap_or(current);
-        let minutes = (current - last).max(0) as f64;
-        out[5] = q(clamp01(minutes / 1440.0));
-    }
-
-    out
-}
-
 pub fn vectorize_input(input: VectorInput<'_>) -> QuantizedVector {
     let (year, month, day, hour, minute) =
         parse_time_bytes(input.requested_at).unwrap_or((2026, 1, 1, 0, 0));
@@ -155,8 +98,7 @@ pub fn bucket_key(v: &QuantizedVector) -> u16 {
     let ratio = bucket8(v[2]);
     let km_home = bucket8(v[7]);
     let tx_count = bucket4(v[8]);
-    let online = if v[9] > 0 { 1 } else { 0 };
-    let mcc_high = if v[12] >= 5_000 { 1 } else { 0 };
+    let hour = bucket4(v[3]);
     let unknown_merchant = if v[11] > 0 { 1 } else { 0 };
     let card_present = if v[10] > 0 { 1 } else { 0 };
     let no_last = if v[5] < 0 { 1 } else { 0 };
@@ -165,26 +107,23 @@ pub fn bucket_key(v: &QuantizedVector) -> u16 {
         | (ratio << 3)
         | (km_home << 6)
         | (tx_count << 9)
-        | (online << 11)
-        | (mcc_high << 12)
+        | (hour << 11)
         | (unknown_merchant << 13)
         | (card_present << 14)
         | (no_last << 15)) as u16
 }
 
-pub fn for_neighbor_key<F>(query: &QuantizedVector, mut visit: F)
-where
-    F: FnMut(u16) -> bool,
-{
+pub fn neighbor_keys(query: &QuantizedVector, out: &mut [u16; BUCKET_COUNT]) -> usize {
     let amount = bucket8(query[0]);
     let ratio = bucket8(query[2]);
     let km_home = bucket8(query[7]);
     let tx_count = bucket4(query[8]);
-    let online = if query[9] > 0 { 1i32 } else { 0i32 };
-    let mcc_high = if query[12] >= 5_000 { 1i32 } else { 0i32 };
+    let hour = bucket4(query[3]);
     let unknown_merchant = if query[11] > 0 { 1i32 } else { 0i32 };
     let card_present = if query[10] > 0 { 1i32 } else { 0i32 };
     let no_last = if query[5] < 0 { 1i32 } else { 0i32 };
+    let mut seen = [false; BUCKET_COUNT];
+    let mut n = 0usize;
 
     for radius in 0..8 {
         for a in (amount - radius).max(0)..=(amount + radius).min(7) {
@@ -192,53 +131,30 @@ where
                 for k in (km_home - radius).max(0)..=(km_home + radius).min(7) {
                     let small_radius = radius.min(3);
                     for tx in (tx_count - small_radius).max(0)..=(tx_count + small_radius).min(3) {
-                        let online_start = if radius >= 3 { 0 } else { online };
-                        let online_end = if radius >= 3 { 1 } else { online };
-                        let mcc_start = if radius >= 3 { 0 } else { mcc_high };
-                        let mcc_end = if radius >= 3 { 1 } else { mcc_high };
-                        for online_bucket in online_start..=online_end {
-                            for mcc_bucket in mcc_start..=mcc_end {
-                                let last_start = if radius >= 2 { 0 } else { no_last };
-                                let last_end = if radius >= 2 { 1 } else { no_last };
-                                let unknown_start = if radius >= 3 { 0 } else { unknown_merchant };
-                                let unknown_end = if radius >= 3 { 1 } else { unknown_merchant };
-                                let card_start = if radius >= 3 { 0 } else { card_present };
-                                let card_end = if radius >= 3 { 1 } else { card_present };
+                        for hr in (hour - small_radius).max(0)..=(hour + small_radius).min(3) {
+                            let last_start = if radius >= 2 { 0 } else { no_last };
+                            let last_end = if radius >= 2 { 1 } else { no_last };
+                            let unknown_start = if radius >= 3 { 0 } else { unknown_merchant };
+                            let unknown_end = if radius >= 3 { 1 } else { unknown_merchant };
+                            let card_start = if radius >= 3 { 0 } else { card_present };
+                            let card_end = if radius >= 3 { 1 } else { card_present };
 
-                                for unknown in unknown_start..=unknown_end {
-                                    for card in card_start..=card_end {
-                                        for last in last_start..=last_end {
-                                            let first_radius = (a - amount)
-                                                .abs()
-                                                .max((r - ratio).abs())
-                                                .max((k - km_home).abs())
-                                                .max((tx - tx_count).abs())
-                                                .max(if online_bucket == online { 0 } else { 3 })
-                                                .max(if mcc_bucket == mcc_high { 0 } else { 3 })
-                                                .max(if last == no_last { 0 } else { 2 })
-                                                .max(if unknown == unknown_merchant {
-                                                    0
-                                                } else {
-                                                    3
-                                                })
-                                                .max(if card == card_present { 0 } else { 3 });
-                                            if first_radius != radius {
-                                                continue;
-                                            }
-
-                                            let key = (a
-                                                | (r << 3)
-                                                | (k << 6)
-                                                | (tx << 9)
-                                                | (online_bucket << 11)
-                                                | (mcc_bucket << 12)
-                                                | (unknown << 13)
-                                                | (card << 14)
-                                                | (last << 15))
-                                                as u16;
-                                            if !visit(key) {
-                                                return;
-                                            }
+                            for unknown in unknown_start..=unknown_end {
+                                for card in card_start..=card_end {
+                                    for last in last_start..=last_end {
+                                        let key = (a
+                                            | (r << 3)
+                                            | (k << 6)
+                                            | (tx << 9)
+                                            | (hr << 11)
+                                            | (unknown << 13)
+                                            | (card << 14)
+                                            | (last << 15))
+                                            as usize;
+                                        if !seen[key] {
+                                            seen[key] = true;
+                                            out[n] = key as u16;
+                                            n += 1;
                                         }
                                     }
                                 }
@@ -249,6 +165,8 @@ where
             }
         }
     }
+
+    n
 }
 
 fn amount_vs_avg(amount: f64, avg: f64) -> f64 {
@@ -425,18 +343,5 @@ mod tests {
         assert_eq!(vector[4], 8333);
         assert_eq!(vector[11], 10000);
         assert_eq!(vector[12], 7500);
-    }
-
-    #[test]
-    fn profile_probe_reconstructs_full_vector() {
-        for body in [
-            include_bytes!("../resources/example-payload-legit.json").as_slice(),
-            include_bytes!("../resources/example-payload-fraud.json").as_slice(),
-        ] {
-            let payload = parse_payload(body).unwrap();
-            let full = vectorize(&payload);
-            let probe = vectorize_profile_probe(&payload);
-            assert_eq!(vectorize_from_profile_probe(&payload, probe), full);
-        }
     }
 }

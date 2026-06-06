@@ -5,7 +5,6 @@ param(
     [string]$RunnerPreset = "default",
     [string]$ProjectName = "rinha-rust-local",
     [string]$K6Image = $env:K6_IMAGE,
-    [string]$HostPort = $env:HOST_PORT,
     [string]$EarlyCandidates = $env:EARLY_CANDIDATES,
     [string]$MinCandidates = $env:MIN_CANDIDATES,
     [string]$MaxCandidates = $env:MAX_CANDIDATES,
@@ -19,9 +18,6 @@ param(
     [string]$ProfileDominantMinCount = $env:PROFILE_DOMINANT_MIN_COUNT,
     [string]$ProfileDominantMaxOpposite = $env:PROFILE_DOMINANT_MAX_OPPOSITE,
     [string]$ExactFallback = $env:EXACT_FALLBACK,
-    [string]$BucketExactFallback = $env:BUCKET_EXACT_FALLBACK,
-    [string]$SelectiveBucketExact = $env:SELECTIVE_BUCKET_EXACT,
-    [string]$BucketExactWarmCandidates = $env:BUCKET_EXACT_WARM_CANDIDATES,
     [string]$RiskySemanticGroups = $env:RISKY_SEMANTIC_GROUPS,
     [string]$RiskySemanticRadius = $env:RISKY_SEMANTIC_RADIUS,
     [string]$EarlyEdgeFallback = $env:EARLY_EDGE_FALLBACK,
@@ -38,13 +34,6 @@ param(
     [string]$RiskyMerchantAvgMax = $env:RISKY_MERCHANT_AVG_MAX,
     [string]$FastPath = $env:FAST_PATH,
     [string]$FdEpollRaw = $env:FD_EPOLL_RAW,
-    [string]$TcpClientSetup = $env:TCP_CLIENT_SETUP,
-    [string]$TcpAcceptBatch = $env:TCP_ACCEPT_BATCH,
-    [string]$TcpDeferAccept = $env:TCP_DEFER_ACCEPT,
-    [string]$FdEpollTimeoutMs = $env:FD_EPOLL_TIMEOUT_MS,
-    [string]$FdEpollSpinUs = $env:FD_EPOLL_SPIN_US,
-    [string]$FdEpollIdleUs = $env:FD_EPOLL_IDLE_US,
-    [string]$FdConnPoolCap = $env:FD_CONN_POOL_CAP,
     [string]$Workers = $env:WORKERS,
     [string]$ApiCpu = $env:API_CPU,
     [string]$ApiMemory = $env:API_MEMORY,
@@ -66,27 +55,23 @@ if ([string]::IsNullOrWhiteSpace($K6Image)) {
     $K6Image = "grafana/k6:latest"
 }
 
-if ([string]::IsNullOrWhiteSpace($HostPort)) {
-    $HostPort = "9999"
-}
-
 switch ($RunnerPreset) {
     "remote-ryzen" {
         if ([string]::IsNullOrWhiteSpace($ApiCpu)) {
-            $ApiCpu = "0.050"
+            $ApiCpu = "0.300"
         }
 
         if ([string]::IsNullOrWhiteSpace($LbCpu)) {
-            $LbCpu = "0.900"
+            $LbCpu = "0.110"
         }
     }
     "remote-ryzen-hard" {
         if ([string]::IsNullOrWhiteSpace($ApiCpu)) {
-            $ApiCpu = "0.050"
+            $ApiCpu = "0.300"
         }
 
         if ([string]::IsNullOrWhiteSpace($LbCpu)) {
-            $LbCpu = "0.900"
+            $LbCpu = "0.108"
         }
     }
 }
@@ -144,17 +129,6 @@ if (([string]::IsNullOrWhiteSpace($ProfileFastPathReferenceSha256) -or [string]:
 }
 
 $overrideFile = $null
-$lbOverrides = [ordered]@{
-    "TCP_CLIENT_SETUP" = $TcpClientSetup
-    "TCP_ACCEPT_BATCH" = $TcpAcceptBatch
-    "TCP_DEFER_ACCEPT" = $TcpDeferAccept
-    "TCP_EPOLL_RAW" = $FdEpollRaw
-    "FD_EPOLL_TIMEOUT_MS" = $FdEpollTimeoutMs
-    "FD_EPOLL_SPIN_US" = $FdEpollSpinUs
-    "FD_EPOLL_IDLE_US" = $FdEpollIdleUs
-    "FD_CONN_POOL_CAP" = $FdConnPoolCap
-}
-
 $apiOverrides = [ordered]@{
     "EARLY_CANDIDATES" = $EarlyCandidates
     "MIN_CANDIDATES" = $MinCandidates
@@ -169,9 +143,6 @@ $apiOverrides = [ordered]@{
     "PROFILE_DOMINANT_MIN_COUNT" = $ProfileDominantMinCount
     "PROFILE_DOMINANT_MAX_OPPOSITE" = $ProfileDominantMaxOpposite
     "EXACT_FALLBACK" = $ExactFallback
-    "BUCKET_EXACT_FALLBACK" = $BucketExactFallback
-    "SELECTIVE_BUCKET_EXACT" = $SelectiveBucketExact
-    "BUCKET_EXACT_WARM_CANDIDATES" = $BucketExactWarmCandidates
     "RISKY_SEMANTIC_GROUPS" = $RiskySemanticGroups
     "RISKY_SEMANTIC_RADIUS" = $RiskySemanticRadius
     "EARLY_EDGE_FALLBACK" = $EarlyEdgeFallback
@@ -187,14 +158,8 @@ $apiOverrides = [ordered]@{
     "RISKY_MERCHANT_AVG_MIN" = $RiskyMerchantAvgMin
     "RISKY_MERCHANT_AVG_MAX" = $RiskyMerchantAvgMax
     "FAST_PATH" = $FastPath
+    "FD_EPOLL_RAW" = $FdEpollRaw
     "WORKERS" = $Workers
-}
-
-$activeLbOverrides = @()
-foreach ($item in $lbOverrides.GetEnumerator()) {
-    if (-not [string]::IsNullOrWhiteSpace($item.Value)) {
-        $activeLbOverrides += $item
-    }
 }
 
 $activeApiOverrides = @()
@@ -216,20 +181,13 @@ $hasCpusetOverrides =
     -not [string]::IsNullOrWhiteSpace($Api2Cpuset) -or
     -not [string]::IsNullOrWhiteSpace($LbCpuset)
 
-if ($activeLbOverrides.Count -gt 0 -or $activeApiOverrides.Count -gt 0 -or $hasResourceOverrides -or $hasCpusetOverrides) {
+if ($activeApiOverrides.Count -gt 0 -or $hasResourceOverrides -or $hasCpusetOverrides) {
     $overrideFile = Join-Path ([System.IO.Path]::GetTempPath()) "$ProjectName.override.yml"
     $lines = @("services:")
-    if ($activeLbOverrides.Count -gt 0 -or -not [string]::IsNullOrWhiteSpace($LbCpu) -or -not [string]::IsNullOrWhiteSpace($LbMemory) -or -not [string]::IsNullOrWhiteSpace($LbCpuset)) {
+    if (-not [string]::IsNullOrWhiteSpace($LbCpu) -or -not [string]::IsNullOrWhiteSpace($LbMemory) -or -not [string]::IsNullOrWhiteSpace($LbCpuset)) {
         $lines += "  lb:"
         if (-not [string]::IsNullOrWhiteSpace($LbCpuset)) {
             $lines += "    cpuset: `"$LbCpuset`""
-        }
-
-        if ($activeLbOverrides.Count -gt 0) {
-            $lines += "    environment:"
-            foreach ($item in $activeLbOverrides) {
-                $lines += "      $($item.Key): `"$($item.Value)`""
-            }
         }
 
         if (-not [string]::IsNullOrWhiteSpace($LbCpu) -or -not [string]::IsNullOrWhiteSpace($LbMemory)) {
@@ -323,7 +281,7 @@ try {
     $ready = $false
     for ($i = 0; $i -lt 90; $i++) {
         try {
-            $response = Invoke-WebRequest -Uri "http://127.0.0.1:$HostPort/ready" -UseBasicParsing -TimeoutSec 2
+            $response = Invoke-WebRequest -Uri "http://127.0.0.1:9999/ready" -UseBasicParsing -TimeoutSec 2
             if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
                 $ready = $true
                 break
@@ -334,7 +292,7 @@ try {
     }
 
     if (-not $ready) {
-        throw "backend did not become ready on http://127.0.0.1:$HostPort/ready"
+        throw "backend did not become ready on http://127.0.0.1:9999/ready"
     }
 
     $mount = "${testDir}:/scripts"

@@ -9,20 +9,16 @@ use crate::index::{Index, SearchParams};
 use std::env;
 use std::fs;
 use std::io;
-use std::net::{SocketAddr, SocketAddrV4, TcpListener as StdTcpListener};
-use std::os::fd::{IntoRawFd, RawFd};
+use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::atomic::AtomicUsize;
-use std::sync::mpsc;
 use std::sync::Arc;
-use std::thread;
 use std::time::Instant;
 
 const MAX_EVENTS: usize = 1024;
 const MAX_FD_SLOTS: usize = 65_536;
-const PENDING_CAP: usize = 512;
 
 #[derive(Clone, Copy)]
 struct WaitTuning {
@@ -39,13 +35,11 @@ struct BusyPollTuning {
 }
 
 struct Conn {
-    buf: [u8; RX_CAP],
+    buf: Vec<u8>,
     head: usize,
     tail: usize,
-    pending: [u8; PENDING_CAP],
-    pending_len: usize,
+    pending: Vec<u8>,
     pending_off: usize,
-    registered_write: bool,
     handled: usize,
     close_after_write: bool,
 }
@@ -53,19 +47,17 @@ struct Conn {
 impl Conn {
     fn new_box() -> Box<Self> {
         Box::new(Self {
-            buf: [0u8; RX_CAP],
+            buf: vec![0u8; RX_CAP],
             head: 0,
             tail: 0,
-            pending: [0u8; PENDING_CAP],
-            pending_len: 0,
+            pending: Vec::with_capacity(8192),
             pending_off: 0,
-            registered_write: false,
             handled: 0,
             close_after_write: false,
         })
     }
 
-    fn reset(&mut self, initial: &[u8]) {
+    fn reset(&mut self, initial: Vec<u8>) {
         let tail = initial.len().min(RX_CAP);
         if tail > 0 {
             self.buf[..tail].copy_from_slice(&initial[..tail]);
@@ -73,39 +65,10 @@ impl Conn {
 
         self.head = 0;
         self.tail = tail;
-        self.pending_len = 0;
+        self.pending.clear();
         self.pending_off = 0;
-        self.registered_write = false;
         self.handled = 0;
         self.close_after_write = false;
-    }
-
-    fn has_pending(&self) -> bool {
-        self.pending_off < self.pending_len
-    }
-
-    fn append_pending(&mut self, bytes: &[u8]) -> io::Result<()> {
-        let Some(end) = self.pending_len.checked_add(bytes.len()) else {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
-                "pending response overflow",
-            ));
-        };
-        if end > self.pending.len() {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
-                "pending response buffer full",
-            ));
-        }
-
-        self.pending[self.pending_len..end].copy_from_slice(bytes);
-        self.pending_len = end;
-        Ok(())
-    }
-
-    fn clear_pending(&mut self) {
-        self.pending_len = 0;
-        self.pending_off = 0;
     }
 }
 
@@ -132,7 +95,7 @@ impl ConnTable {
         }
     }
 
-    fn insert(&mut self, fd: RawFd, initial: &[u8]) -> bool {
+    fn insert(&mut self, fd: RawFd, initial: Vec<u8>) -> bool {
         let idx = fd as usize;
         if idx >= self.slots.len() || self.slots[idx].is_some() {
             return false;
@@ -142,6 +105,10 @@ impl ConnTable {
         conn.reset(initial);
         self.slots[idx] = Some(conn);
         true
+    }
+
+    fn get(&self, fd: RawFd) -> Option<&Conn> {
+        self.slots.get(fd as usize)?.as_deref()
     }
 
     fn get_mut(&mut self, fd: RawFd) -> Option<&mut Conn> {
@@ -155,7 +122,7 @@ impl ConnTable {
         }
 
         if let Some(mut conn) = self.slots[idx].take() {
-            conn.reset(&[]);
+            conn.reset(Vec::new());
             if self.pool.len() < self.pool_cap {
                 self.pool.push(conn);
             }
@@ -259,223 +226,11 @@ pub fn serve_fd_epoll(
                 clients.remove(fd);
                 epoll_delete(epfd, fd);
                 close_fd(fd);
-            } else if let Some(conn) = clients.get_mut(fd) {
-                let needs_write = conn.has_pending();
-                if conn.registered_write != needs_write {
-                    let _ = epoll_mod(epfd, fd, client_interest(needs_write));
-                    conn.registered_write = needs_write;
-                }
+            } else if let Some(conn) = clients.get(fd) {
+                let _ = epoll_mod(epfd, fd, client_interest(!conn.pending.is_empty()));
             }
         }
     }
-}
-
-pub fn serve_tcp_epoll(
-    bind_addr: &str,
-    index: Arc<Index>,
-    params: Arc<SearchParams>,
-    load: Arc<AtomicUsize>,
-    keep_alive_requests: usize,
-) -> Result<(), String> {
-    let worker_count = env_usize("TCP_RAW_WORKERS", 1).max(1);
-    if worker_count == 1 {
-        return serve_tcp_epoll_worker(0, bind_addr, index, params, load, keep_alive_requests);
-    }
-
-    let (tx, rx) = mpsc::channel::<String>();
-    for worker_id in 0..worker_count {
-        let bind_addr = bind_addr.to_string();
-        let index = Arc::clone(&index);
-        let params = Arc::clone(&params);
-        let load = Arc::clone(&load);
-        let tx = tx.clone();
-        thread::Builder::new()
-            .name(format!("tcp-raw-{worker_id}"))
-            .spawn(move || {
-                if let Err(err) = serve_tcp_epoll_worker(
-                    worker_id,
-                    &bind_addr,
-                    index,
-                    params,
-                    load,
-                    keep_alive_requests,
-                ) {
-                    let _ = tx.send(err);
-                }
-            })
-            .map_err(|e| format!("failed to spawn tcp raw worker {worker_id}: {e}"))?;
-    }
-    drop(tx);
-
-    match rx.recv() {
-        Ok(err) => Err(err),
-        Err(_) => Err("all tcp raw workers exited".to_string()),
-    }
-}
-
-fn serve_tcp_epoll_worker(
-    worker_id: usize,
-    bind_addr: &str,
-    index: Arc<Index>,
-    params: Arc<SearchParams>,
-    load: Arc<AtomicUsize>,
-    keep_alive_requests: usize,
-) -> Result<(), String> {
-    let listener_fd = create_tcp_listener(bind_addr)?;
-    let epfd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
-    if epfd < 0 {
-        close_fd(listener_fd);
-        return Err(format!(
-            "failed to create tcp epoll: {}",
-            io::Error::last_os_error()
-        ));
-    }
-    let busy_poll = configure_busy_poll(epfd);
-
-    if let Err(err) = epoll_add(epfd, listener_fd, control_interest()) {
-        close_fd(listener_fd);
-        close_fd(epfd);
-        return Err(format!("failed to register tcp listener: {err}"));
-    }
-
-    let wait = WaitTuning {
-        timeout_ms: env_i32("FD_EPOLL_TIMEOUT_MS", 1),
-        spin_us: env_usize("FD_EPOLL_SPIN_US", 0),
-        idle_us: env_usize("FD_EPOLL_IDLE_US", 0),
-    };
-    let accept_batch = env_usize("TCP_ACCEPT_BATCH", 64);
-    let tcp_client_setup = env_bool("TCP_CLIENT_SETUP", true);
-    let conn_pool_cap = env_usize("FD_CONN_POOL_CAP", 512);
-    let mut events = vec![empty_event(); MAX_EVENTS];
-    let mut clients = ConnTable::new(conn_pool_cap);
-
-    eprintln!(
-        "tcp epoll raw enabled, worker={worker_id}, bind={bind_addr}, timeout_ms={}, spin_us={}, idle_us={}, busy_poll_us={}, busy_poll_budget={}, prefer_busy_poll={}, accept_batch={accept_batch}, tcp_client_setup={tcp_client_setup}, conn_pool_cap={conn_pool_cap}",
-        wait.timeout_ms,
-        wait.spin_us,
-        wait.idle_us,
-        busy_poll.usecs,
-        busy_poll.budget,
-        busy_poll.prefer
-    );
-
-    loop {
-        let ready = wait_events(epfd, &mut events, wait)
-            .map_err(|err| format!("tcp epoll wait failed: {err}"))?;
-
-        for event in events.iter().take(ready as usize) {
-            let fd = event.u64 as RawFd;
-            let flags = event.events;
-
-            if fd == listener_fd {
-                accept_tcp_clients(
-                    listener_fd,
-                    epfd,
-                    accept_batch,
-                    &mut clients,
-                    &index,
-                    &params,
-                    &load,
-                    keep_alive_requests,
-                    tcp_client_setup,
-                )?;
-                continue;
-            }
-
-            let mut should_close = is_closed_event(flags);
-            if let Some(conn) = clients.get_mut(fd) {
-                match handle_client(fd, flags, conn, &index, &params, &load, keep_alive_requests) {
-                    Ok(close) => should_close |= close,
-                    Err(_) => should_close = true,
-                }
-            } else {
-                should_close = true;
-            }
-
-            if should_close {
-                clients.remove(fd);
-                epoll_delete(epfd, fd);
-                close_fd(fd);
-            } else if let Some(conn) = clients.get_mut(fd) {
-                let needs_write = conn.has_pending();
-                if conn.registered_write != needs_write {
-                    let _ = epoll_mod(epfd, fd, client_interest(needs_write));
-                    conn.registered_write = needs_write;
-                }
-            }
-        }
-    }
-}
-
-fn create_tcp_listener(bind_addr: &str) -> Result<RawFd, String> {
-    let parsed: SocketAddr = bind_addr
-        .parse()
-        .map_err(|e| format!("failed to parse raw tcp bind address {bind_addr}: {e}"))?;
-    match parsed {
-        SocketAddr::V4(addr) => create_tcp_v4_listener(addr, bind_addr),
-        SocketAddr::V6(_) => {
-            let listener = StdTcpListener::bind(bind_addr)
-                .map_err(|e| format!("failed to bind raw tcp listener {bind_addr}: {e}"))?;
-            listener
-                .set_nonblocking(true)
-                .map_err(|e| format!("failed to set raw tcp listener nonblocking: {e}"))?;
-            let fd = listener.into_raw_fd();
-            configure_tcp_listener(fd);
-            Ok(fd)
-        }
-    }
-}
-
-fn create_tcp_v4_listener(addr: SocketAddrV4, bind_addr: &str) -> Result<RawFd, String> {
-    let fd = unsafe {
-        libc::socket(
-            libc::AF_INET,
-            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
-            0,
-        )
-    };
-    if fd < 0 {
-        return Err(format!(
-            "failed to create raw tcp listener socket {bind_addr}: {}",
-            io::Error::last_os_error()
-        ));
-    }
-
-    configure_tcp_listener(fd);
-
-    let sockaddr = libc::sockaddr_in {
-        sin_family: libc::AF_INET as libc::sa_family_t,
-        sin_port: addr.port().to_be(),
-        sin_addr: libc::in_addr {
-            s_addr: u32::from_ne_bytes(addr.ip().octets()),
-        },
-        sin_zero: [0; 8],
-    };
-
-    if unsafe {
-        libc::bind(
-            fd,
-            (&sockaddr as *const libc::sockaddr_in).cast(),
-            std::mem::size_of_val(&sockaddr) as libc::socklen_t,
-        )
-    } < 0
-    {
-        let err = io::Error::last_os_error();
-        close_fd(fd);
-        return Err(format!(
-            "failed to bind raw tcp listener {bind_addr}: {err}"
-        ));
-    }
-
-    if unsafe { libc::listen(fd, env_i32("TCP_BACKLOG", 65535)) } < 0 {
-        let err = io::Error::last_os_error();
-        close_fd(fd);
-        return Err(format!(
-            "failed to listen on raw tcp listener {bind_addr}: {err}"
-        ));
-    }
-
-    Ok(fd)
 }
 
 fn accept_controls(
@@ -513,78 +268,6 @@ fn accept_controls(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn accept_tcp_clients(
-    listener_fd: RawFd,
-    epfd: RawFd,
-    accept_batch: usize,
-    clients: &mut ConnTable,
-    index: &Index,
-    params: &SearchParams,
-    load: &AtomicUsize,
-    keep_alive_requests: usize,
-    tcp_client_setup: bool,
-) -> Result<(), String> {
-    for _ in 0..accept_batch {
-        let fd = unsafe {
-            libc::accept4(
-                listener_fd,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            let err = io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::EINTR) {
-                continue;
-            }
-            if matches!(err.kind(), io::ErrorKind::WouldBlock) {
-                return Ok(());
-            }
-            return Err(format!("tcp accept error: {err}"));
-        }
-
-        configure_tcp_client(fd, tcp_client_setup);
-        if !clients.insert(fd, &[]) {
-            close_fd(fd);
-            continue;
-        }
-
-        let mut close_now = false;
-        let mut has_pending = false;
-        let mut client_error = false;
-        if let Some(conn) = clients.get_mut(fd) {
-            if read_available(fd, conn).is_err()
-                || parse_available(fd, conn, index, params, load, keep_alive_requests).is_err()
-                || flush_pending(fd, conn).is_err()
-            {
-                client_error = true;
-            }
-            close_now = conn.close_after_write && !conn.has_pending();
-            has_pending = conn.has_pending();
-        }
-
-        if client_error || close_now {
-            clients.remove(fd);
-            close_fd(fd);
-            continue;
-        }
-
-        if let Some(conn) = clients.get_mut(fd) {
-            conn.registered_write = has_pending;
-        }
-
-        if let Err(err) = epoll_add(epfd, fd, client_interest(has_pending)) {
-            clients.remove(fd);
-            close_fd(fd);
-            return Err(format!("failed to register tcp client: {err}"));
-        }
-    }
-
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
 fn receive_passed_fds(
     epfd: RawFd,
     control_fd: RawFd,
@@ -595,21 +278,16 @@ fn receive_passed_fds(
     load: &AtomicUsize,
     keep_alive_requests: usize,
 ) -> Result<(), String> {
-    let mut initial_buf = [0u8; RX_CAP];
     loop {
-        let received = match fdpass::receive_client_fd_raw_into(
-            control_fd,
-            keep_initial,
-            libc::MSG_DONTWAIT,
-            &mut initial_buf,
-        ) {
-            Ok(Some(received)) => received,
-            Ok(None) => return Ok(()),
-            Err(err) => return Err(format!("fd control receive error: {err}")),
-        };
+        let received =
+            match fdpass::receive_client_fd_raw(control_fd, keep_initial, libc::MSG_DONTWAIT) {
+                Ok(Some(received)) => received,
+                Ok(None) => return Ok(()),
+                Err(err) => return Err(format!("fd control receive error: {err}")),
+            };
 
         let fd = received.fd;
-        if !clients.insert(fd, &initial_buf[..received.initial_len]) {
+        if !clients.insert(fd, received.initial) {
             close_fd(fd);
             continue;
         }
@@ -625,8 +303,8 @@ fn receive_passed_fds(
                     client_error = true;
                 }
             }
-            close_now = conn.close_after_write && !conn.has_pending();
-            has_pending = conn.has_pending();
+            close_now = conn.close_after_write && conn.pending.is_empty();
+            has_pending = !conn.pending.is_empty();
         }
 
         if client_error {
@@ -639,10 +317,6 @@ fn receive_passed_fds(
             clients.remove(fd);
             close_fd(fd);
             continue;
-        }
-
-        if let Some(conn) = clients.get_mut(fd) {
-            conn.registered_write = has_pending;
         }
 
         if let Err(err) = epoll_add(epfd, fd, client_interest(has_pending)) {
@@ -665,7 +339,7 @@ fn handle_client(
     if flags & libc::EPOLLOUT as u32 != 0 {
         flush_pending(fd, conn)?;
     }
-    if conn.close_after_write && !conn.has_pending() {
+    if conn.close_after_write && conn.pending.is_empty() {
         return Ok(true);
     }
 
@@ -675,7 +349,7 @@ fn handle_client(
         flush_pending(fd, conn)?;
     }
 
-    Ok(conn.close_after_write && !conn.has_pending())
+    Ok(conn.close_after_write && conn.pending.is_empty())
 }
 
 fn read_available(fd: RawFd, conn: &mut Conn) -> io::Result<()> {
@@ -771,8 +445,8 @@ fn parse_available(
 }
 
 fn write_or_buffer(fd: RawFd, conn: &mut Conn, response: &'static [u8]) -> io::Result<()> {
-    if conn.has_pending() {
-        conn.append_pending(response)?;
+    if !conn.pending.is_empty() {
+        conn.pending.extend_from_slice(response);
         return Ok(());
     }
 
@@ -798,7 +472,7 @@ fn write_or_buffer(fd: RawFd, conn: &mut Conn, response: &'static [u8]) -> io::R
                 continue;
             }
             if matches!(err.kind(), io::ErrorKind::WouldBlock) {
-                conn.append_pending(&response[off..])?;
+                conn.pending.extend_from_slice(&response[off..]);
                 return Ok(());
             }
             return Err(err);
@@ -809,8 +483,8 @@ fn write_or_buffer(fd: RawFd, conn: &mut Conn, response: &'static [u8]) -> io::R
 }
 
 fn flush_pending(fd: RawFd, conn: &mut Conn) -> io::Result<()> {
-    while conn.pending_off < conn.pending_len {
-        let out = &conn.pending[conn.pending_off..conn.pending_len];
+    while conn.pending_off < conn.pending.len() {
+        let out = &conn.pending[conn.pending_off..];
         let sent = unsafe { libc::send(fd, out.as_ptr().cast(), out.len(), send_flags()) };
         if sent == 0 {
             return Err(io::Error::new(
@@ -832,7 +506,8 @@ fn flush_pending(fd: RawFd, conn: &mut Conn) -> io::Result<()> {
     }
 
     if conn.pending_off > 0 {
-        conn.clear_pending();
+        conn.pending.clear();
+        conn.pending_off = 0;
     }
     Ok(())
 }
@@ -869,6 +544,10 @@ fn client_interest(has_pending: bool) -> u32 {
     if has_pending {
         events |= libc::EPOLLOUT as u32;
     }
+    #[cfg(target_os = "linux")]
+    {
+        events |= libc::EPOLLRDHUP as u32;
+    }
     events
 }
 
@@ -884,78 +563,6 @@ fn is_closed_event(flags: u32) -> bool {
 fn close_fd(fd: RawFd) {
     unsafe {
         let _ = libc::close(fd);
-    }
-}
-
-fn configure_tcp_listener(fd: RawFd) {
-    let one = 1;
-    unsafe {
-        let _ = libc::setsockopt(
-            fd,
-            libc::SOL_SOCKET,
-            libc::SO_REUSEADDR,
-            (&one as *const libc::c_int).cast(),
-            std::mem::size_of_val(&one) as libc::socklen_t,
-        );
-        #[cfg(target_os = "linux")]
-        if env_bool("TCP_REUSEPORT", true) {
-            let _ = libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_REUSEPORT,
-                (&one as *const libc::c_int).cast(),
-                std::mem::size_of_val(&one) as libc::socklen_t,
-            );
-        }
-        if env_bool("TCP_DEFER_ACCEPT", true) {
-            let _ = libc::setsockopt(
-                fd,
-                libc::IPPROTO_TCP,
-                libc::TCP_DEFER_ACCEPT,
-                (&one as *const libc::c_int).cast(),
-                std::mem::size_of_val(&one) as libc::socklen_t,
-            );
-        }
-        #[cfg(target_os = "linux")]
-        {
-            let busy_poll_us = env_i32("TCP_SOCKET_BUSY_POLL_US", 0);
-            if busy_poll_us > 0 {
-                let _ = libc::setsockopt(
-                    fd,
-                    libc::SOL_SOCKET,
-                    libc::SO_BUSY_POLL,
-                    (&busy_poll_us as *const libc::c_int).cast(),
-                    std::mem::size_of_val(&busy_poll_us) as libc::socklen_t,
-                );
-            }
-        }
-    }
-}
-
-fn configure_tcp_client(fd: RawFd, enabled: bool) {
-    if !enabled {
-        return;
-    }
-
-    let one = 1;
-    unsafe {
-        let _ = libc::setsockopt(
-            fd,
-            libc::IPPROTO_TCP,
-            libc::TCP_NODELAY,
-            (&one as *const libc::c_int).cast(),
-            std::mem::size_of_val(&one) as libc::socklen_t,
-        );
-        #[cfg(target_os = "linux")]
-        {
-            let _ = libc::setsockopt(
-                fd,
-                libc::IPPROTO_TCP,
-                libc::TCP_QUICKACK,
-                (&one as *const libc::c_int).cast(),
-                std::mem::size_of_val(&one) as libc::socklen_t,
-            );
-        }
     }
 }
 

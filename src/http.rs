@@ -1,11 +1,8 @@
 #[cfg(unix)]
 use crate::fdpass;
 use crate::index::{exact_fallback_name, Index, SearchParams};
-use crate::known_ids;
 use crate::parser::parse_payload;
-use crate::vector::{
-    vectorize, vectorize_from_profile_probe, vectorize_profile_probe, QuantizedVector, SCALE,
-};
+use crate::vector::{vectorize, QuantizedVector, SCALE};
 use std::env;
 #[cfg(unix)]
 use std::fs;
@@ -29,15 +26,21 @@ use tokio::net::UnixListener;
 use tokio::runtime::{Builder, Handle};
 
 const MAX_REQUEST_BYTES: usize = 32 * 1024;
-pub(crate) const RX_CAP: usize = 2 * 1024;
+pub(crate) const RX_CAP: usize = 64 * 1024;
 const MAX_BATCHED_RESPONSES: usize = 16;
 
-const RESP_APPROVED_0: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length:17\r\n\r\n{\"approved\":true}";
-const RESP_APPROVED_02: &[u8] = RESP_APPROVED_0;
-const RESP_APPROVED_04: &[u8] = RESP_APPROVED_0;
-const RESP_REJECTED_06: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length:18\r\n\r\n{\"approved\":false}";
-const RESP_REJECTED_08: &[u8] = RESP_REJECTED_06;
-const RESP_REJECTED_1: &[u8] = RESP_REJECTED_06;
+const RESP_APPROVED_0: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Length:35\r\n\r\n{\"approved\":true,\"fraud_score\":0.0}";
+const RESP_APPROVED_02: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Length:35\r\n\r\n{\"approved\":true,\"fraud_score\":0.2}";
+const RESP_APPROVED_04: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Length:35\r\n\r\n{\"approved\":true,\"fraud_score\":0.4}";
+const RESP_REJECTED_06: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Length:36\r\n\r\n{\"approved\":false,\"fraud_score\":0.6}";
+const RESP_REJECTED_08: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Length:36\r\n\r\n{\"approved\":false,\"fraud_score\":0.8}";
+const RESP_REJECTED_1: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Length:36\r\n\r\n{\"approved\":false,\"fraud_score\":1.0}";
 pub(crate) const RESP_READY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length:0\r\n\r\n";
 pub(crate) const RESP_NOT_FOUND: &[u8] = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
 pub(crate) const RESP_BAD_REQUEST: &[u8] =
@@ -68,7 +71,6 @@ pub fn serve() -> Result<(), String> {
     let fd_epoll_raw = env_bool("FD_EPOLL_RAW", true);
     let fd_control_path = parse_fd_control_path(&bind_addr).map(str::to_owned);
     let unix_socket_path = parse_unix_socket_path(&bind_addr).map(str::to_owned);
-    let rpc_socket_path = parse_rpc_socket_path(&bind_addr).map(str::to_owned);
     let params = Arc::new(SearchParams::from_env());
     let index = Arc::new(Index::open(&index_path)?);
     if env_bool("PREFETCH_INDEX", true) {
@@ -79,7 +81,7 @@ pub fn serve() -> Result<(), String> {
     let load = Arc::new(AtomicUsize::new(0));
 
     eprintln!(
-        "serving on {bind_addr}, index={index_path}, references_gzip_sha256={}, references_json_sha256={}, profile_fastpaths_allowed={}, workers={workers}, keep_alive_requests={keep_alive_requests}, accept=manual-http1, fd_epoll_raw={fd_epoll_raw}, early_candidates={}, min_candidates={}, max_candidates={}, profile_fastpath={}, profile_min_count={}, profile_legit_min_count={}, profile_fraud_min_count={}, profile_dominant_fastpath={}, profile_dominant_min_count={}, profile_dominant_max_opposite={}, early_edge_fallback={}, exact_fallback={}, bucket_exact_fallback={}, selective_bucket_exact={}, bucket_exact_warm_candidates={}, profile_exact_triggers={}, risky_fallback_refs={}, risky_semantic_groups={}, risky_semantic_radius={}, overload_min_candidates={}, overload_max_candidates={}, overload_threshold={}, overload_fast_only={}, search_fallback_last_distance={}, flat={}, fast_path={}, fast_only={}",
+        "serving on {bind_addr}, index={index_path}, references_gzip_sha256={}, references_json_sha256={}, profile_fastpaths_allowed={}, workers={workers}, keep_alive_requests={keep_alive_requests}, accept=manual-http1, fd_epoll_raw={fd_epoll_raw}, early_candidates={}, min_candidates={}, max_candidates={}, profile_fastpath={}, profile_min_count={}, profile_legit_min_count={}, profile_fraud_min_count={}, profile_dominant_fastpath={}, profile_dominant_min_count={}, profile_dominant_max_opposite={}, early_edge_fallback={}, exact_fallback={}, risky_fallback_refs={}, risky_semantic_groups={}, risky_semantic_radius={}, overload_min_candidates={}, overload_max_candidates={}, overload_threshold={}, overload_fast_only={}, search_fallback_last_distance={}, flat={}, fast_path={}, fast_only={}",
         index
             .references_gzip_sha256_hex()
             .unwrap_or_else(|| "none".to_string()),
@@ -99,10 +101,6 @@ pub fn serve() -> Result<(), String> {
         params.profile_dominant_max_opposite,
         params.early_edge_fallback,
         exact_fallback_name(params.exact_fallback),
-        params.bucket_exact_fallback,
-        params.selective_bucket_exact,
-        params.bucket_exact_warm_candidates,
-        params.profile_exact_triggers,
         index.risky_fallback_count(),
         params.risky_semantic_groups,
         params.risky_semantic_radius,
@@ -129,24 +127,6 @@ pub fn serve() -> Result<(), String> {
         }
     }
 
-    #[cfg(unix)]
-    if let Some(rpc_socket_path) = rpc_socket_path.as_deref() {
-        if env_bool("RPC_EPOLL_RAW", true) {
-            return crate::rpc_server::serve_rpc_raw(rpc_socket_path, index, params, load);
-        }
-    }
-
-    #[cfg(unix)]
-    if env_bool("TCP_EPOLL_RAW", false) && fd_control_path.is_none() && unix_socket_path.is_none() {
-        return crate::raw_server::serve_tcp_epoll(
-            &bind_addr,
-            index,
-            params,
-            load,
-            keep_alive_requests,
-        );
-    }
-
     let runtime = Builder::new_multi_thread()
         .worker_threads(workers)
         .enable_io()
@@ -171,18 +151,6 @@ pub fn serve() -> Result<(), String> {
             {
                 let _ = fd_control_path;
                 return Err("fd control sockets are only supported on unix targets".to_string());
-            }
-        }
-
-        if let Some(rpc_socket_path) = rpc_socket_path {
-            #[cfg(unix)]
-            {
-                return crate::rpc_server::serve_rpc(&rpc_socket_path, index, params, load).await;
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = rpc_socket_path;
-                return Err("rpc sockets are only supported on unix targets".to_string());
             }
         }
 
@@ -483,13 +451,6 @@ where
 }
 
 pub(crate) fn parse_request(buf: &[u8]) -> ParsedRequest {
-    if buf.starts_with(b"POST /fraud-score HTTP/1.1\r\n") {
-        return parse_fraud_post_fast(buf, b"POST /fraud-score HTTP/1.1\r\n".len());
-    }
-    if buf.starts_with(b"GET /ready HTTP/1.1\r\n") {
-        return parse_ready_get_fast(buf, b"GET /ready HTTP/1.1\r\n".len());
-    }
-
     let header_end = match find_header_end(buf) {
         Some(pos) => pos,
         None => return ParsedRequest::Incomplete,
@@ -538,146 +499,43 @@ pub(crate) fn parse_request(buf: &[u8]) -> ParsedRequest {
     ParsedRequest::Bad
 }
 
-fn parse_fraud_post_fast(buf: &[u8], mut pos: usize) -> ParsedRequest {
-    let mut content_length = None;
-
-    loop {
-        let line_start = pos;
-        let line_end = match find_cr_from(buf, pos) {
-            Some(pos) => pos,
-            None => return ParsedRequest::Incomplete,
-        };
-        if line_end + 1 >= buf.len() {
-            return ParsedRequest::Incomplete;
-        }
-        if buf[line_end + 1] != b'\n' {
-            return ParsedRequest::Bad;
-        }
-
-        if line_end == line_start {
-            let body_start = line_end + 2;
-            let content_length = content_length.unwrap_or(0usize);
-            let Some(body_end) = body_start.checked_add(content_length) else {
-                return ParsedRequest::Bad;
-            };
-            if buf.len() < body_end {
-                return ParsedRequest::Incomplete;
-            }
-            return ParsedRequest::Fraud {
-                body_start,
-                body_end,
-                consumed: body_end,
-            };
-        }
-
-        if content_length.is_none() {
-            content_length = parse_content_length_line(&buf[line_start..line_end]);
-        }
-        pos = line_end + 2;
-    }
-}
-
-fn parse_ready_get_fast(buf: &[u8], mut pos: usize) -> ParsedRequest {
-    loop {
-        let line_start = pos;
-        let line_end = match find_cr_from(buf, pos) {
-            Some(pos) => pos,
-            None => return ParsedRequest::Incomplete,
-        };
-        if line_end + 1 >= buf.len() {
-            return ParsedRequest::Incomplete;
-        }
-        if buf[line_end + 1] != b'\n' {
-            return ParsedRequest::Bad;
-        }
-        if line_end == line_start {
-            return ParsedRequest::Ready {
-                consumed: line_end + 2,
-            };
-        }
-        pos = line_end + 2;
-    }
-}
-
 pub(crate) fn process_fraud(
     body: &[u8],
     index: &Index,
     params: &SearchParams,
     load: &AtomicUsize,
 ) -> &'static [u8] {
-    fraud_response_from_code(process_fraud_code(body, index, params, load))
-}
-
-pub(crate) fn process_fraud_code(
-    body: &[u8],
-    index: &Index,
-    params: &SearchParams,
-    load: &AtomicUsize,
-) -> u8 {
     if body.len() > MAX_REQUEST_BYTES {
-        return 0;
-    }
-
-    if let Some(approved) = known_ids::decision(body) {
-        return if approved { 0 } else { 5 };
+        return RESP_APPROVED_0;
     }
 
     match parse_payload(body) {
         Ok(payload) => {
-            let profile_query = if params.overload_threshold == 0 {
-                let profile_query = vectorize_profile_probe(&payload);
-                if let Some((approved, score)) = index.classify_profile_fast(&profile_query, params)
-                {
-                    return fraud_response_code(approved, score);
-                }
-                Some(profile_query)
-            } else {
-                None
-            };
-
-            let query = profile_query
-                .map(|probe| vectorize_from_profile_probe(&payload, probe))
-                .unwrap_or_else(|| vectorize(&payload));
-            let (approved, score) = if params.overload_threshold == 0 {
-                index.classify(&query, params)
-            } else {
-                let _guard = InFlightGuard::new(load);
-                let classify_params = params.for_load(load.load(Ordering::Relaxed));
-                index.classify(&query, &classify_params)
-            };
-            fraud_response_code(approved, score)
+            let _guard = InFlightGuard::new(load);
+            let query = vectorize(&payload);
+            let classify_params = params.for_load(load.load(Ordering::Relaxed));
+            let (approved, score) = index.classify(&query, &classify_params);
+            fraud_response(approved, score)
         }
-        Err(_) => 0,
+        Err(_) => RESP_APPROVED_0,
     }
 }
 
-fn fraud_response_code(approved: bool, score: f32) -> u8 {
+fn fraud_response(approved: bool, score: f32) -> &'static [u8] {
     if approved {
         if score < 0.1 {
-            0
+            RESP_APPROVED_0
         } else if score < 0.3 {
-            1
+            RESP_APPROVED_02
         } else {
-            2
+            RESP_APPROVED_04
         }
     } else if score < 0.7 {
-        3
+        RESP_REJECTED_06
     } else if score < 0.9 {
-        4
+        RESP_REJECTED_08
     } else {
-        5
-    }
-}
-
-fn fraud_response_from_code(code: u8) -> &'static [u8] {
-    match code {
-        0 => RESP_APPROVED_0,
-        1 => RESP_APPROVED_02,
-        2 => RESP_APPROVED_04,
-        3 => RESP_REJECTED_06,
-        4 => RESP_REJECTED_08,
-        5 => RESP_REJECTED_1,
-        _ => RESP_APPROVED_0,
+        RESP_REJECTED_1
     }
 }
 
@@ -705,43 +563,6 @@ fn find_cr(buf: &[u8], limit: usize) -> Option<usize> {
         pos += 1;
     }
     None
-}
-
-fn find_cr_from(buf: &[u8], mut pos: usize) -> Option<usize> {
-    while pos < buf.len() {
-        if buf[pos] == b'\r' {
-            return Some(pos);
-        }
-        pos += 1;
-    }
-    None
-}
-
-fn parse_content_length_line(line: &[u8]) -> Option<usize> {
-    const KEY: &[u8] = b"Content-Length:";
-    if line.len() < KEY.len() {
-        return None;
-    }
-    if &line[..KEY.len()] != KEY && !eq_ascii_ci(&line[..KEY.len()], KEY) {
-        return None;
-    }
-
-    let mut pos = KEY.len();
-    while pos < line.len() && (line[pos] == b' ' || line[pos] == b'\t') {
-        pos += 1;
-    }
-
-    let mut value = 0usize;
-    let mut has_digit = false;
-    while pos < line.len() && line[pos].is_ascii_digit() {
-        value = value
-            .wrapping_mul(10)
-            .wrapping_add((line[pos] - b'0') as usize);
-        has_digit = true;
-        pos += 1;
-    }
-
-    has_digit.then_some(value)
 }
 
 fn parse_content_length(headers: &[u8]) -> Option<usize> {
@@ -823,10 +644,6 @@ fn env_bool(name: &str, default: bool) -> bool {
 
 fn parse_unix_socket_path(bind_addr: &str) -> Option<&str> {
     bind_addr.strip_prefix("unix:")
-}
-
-fn parse_rpc_socket_path(bind_addr: &str) -> Option<&str> {
-    bind_addr.strip_prefix("rpc:")
 }
 
 fn warm_up_index(index: &Index, params: &SearchParams) {

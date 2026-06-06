@@ -9,11 +9,6 @@ pub struct ReceivedFd {
     pub initial: Vec<u8>,
 }
 
-pub struct ReceivedFdInto {
-    pub fd: RawFd,
-    pub initial_len: usize,
-}
-
 pub fn receive_client_fd(
     control: &UnixStream,
     keep_initial: bool,
@@ -27,37 +22,12 @@ pub fn receive_client_fd_raw(
     flags: libc::c_int,
 ) -> io::Result<Option<ReceivedFd>> {
     let mut data = [0u8; 8192];
-    match receive_client_fd_raw_into(control_fd, keep_initial, flags, &mut data)? {
-        Some(received) => {
-            let initial = data[..received.initial_len].to_vec();
-            Ok(Some(ReceivedFd {
-                fd: received.fd,
-                initial,
-            }))
-        }
-        None => Ok(None),
-    }
-}
-
-pub fn receive_client_fd_raw_into(
-    control_fd: RawFd,
-    keep_initial: bool,
-    flags: libc::c_int,
-    initial_out: &mut [u8],
-) -> io::Result<Option<ReceivedFdInto>> {
-    let mut data = [0u8; 1];
     let mut control_buf = [0u8; 64];
 
     loop {
-        let receive_into_initial = keep_initial && !initial_out.is_empty();
-        let recv_buf = if receive_into_initial {
-            &mut initial_out[..]
-        } else {
-            &mut data[..]
-        };
         let mut iov = libc::iovec {
-            iov_base: recv_buf.as_mut_ptr().cast(),
-            iov_len: recv_buf.len(),
+            iov_base: data.as_mut_ptr().cast(),
+            iov_len: data.len(),
         };
         let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
         msg.msg_iov = &mut iov;
@@ -83,16 +53,13 @@ pub fn receive_client_fd_raw_into(
         let fd = unsafe { first_rights_fd(&msg) }
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing SCM_RIGHTS fd"))?;
 
-        let received_len = received as usize;
-        let initial_len = if receive_into_initial && received_len > 1 {
-            let len = received_len - 1;
-            initial_out.copy_within(1..received_len, 0);
-            len
+        let initial = if keep_initial {
+            data[..received as usize].to_vec()
         } else {
-            0
+            Vec::new()
         };
 
-        return Ok(Some(ReceivedFdInto { fd, initial_len }));
+        return Ok(Some(ReceivedFd { fd, initial }));
     }
 }
 

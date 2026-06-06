@@ -6,20 +6,19 @@ latencia no caminho HTTP oficial e deteccao sem erros no dataset local.
 ## Stack
 
 - API em Rust.
-- Servidor HTTP/1.1 raw em Rust no servico `lb`.
-- Load balancer em C mantido no codigo para testes de transporte alternativos.
+- Load balancer em C com fd-passing para duas instancias da API.
+- Servidor HTTP/1.1 raw com `epoll` nas APIs.
 - Indice vetorial customizado em `mmap`, com buckets, vetores quantizados
   `int16` e fallback exato seletivo.
 - Compose de submissao em `linux/amd64`.
 
 ## Arquitetura
 
-O `lb` aceita conexoes TCP na porta `9999`, faz parse HTTP/JSON no caminho raw
-com `epoll` e executa a classificacao no proprio processo para evitar custo de
-proxy interno. `api1` e `api2` permanecem no compose como instancias minimas para
-manter a topologia da submissao com tres servicos.
+O `lb` aceita conexoes TCP na porta `9999` e distribui os file descriptors por
+sockets Unix de controle em `/sockets`. O load balancer nao executa logica de
+fraude e nao usa dados do payload.
 
-O processo ativo carrega `/app/data/references.idx` e classifica o payload com:
+Cada API carrega `/app/data/references.idx` e classifica o payload com:
 
 - fast path por perfil protegido pelo SHA das referencias;
 - busca aproximada no indice vetorial;
@@ -76,7 +75,5 @@ Antes de abrir teste remoto:
 3. Atualizar a branch `submission` para usar a tag imutavel, nunca `latest`.
 4. Abrir a issue oficial com `scripts/request-remote-test.ps1`.
 
-O compose atual usa Docker bridge/default. O servico `lb` executa o servidor raw
-TCP e classifica no caminho quente; `api1` e `api2` permanecem como instancias
-minimas. Os limites declarados sao `LB/API/API = 0.90/0.05/0.05` CPU e
-`320MB/12MB/12MB` memoria.
+O compose atual usa Docker bridge/default, fd-passing por volume tmpfs de
+sockets, `LB/API/API = 0.20/0.40/0.40` CPU e `20MB/162MB/162MB` memoria.

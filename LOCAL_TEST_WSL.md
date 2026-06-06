@@ -47,7 +47,7 @@ Use esta topologia como baseline local antes de comparar mudancas de transporte,
 indice ou classificacao:
 
 ```powershell
-wsl bash -lc 'cd /root/rinha-2026-rust-wsl-bench; mkdir -p /tmp/docker-anon; printf "{}\n" > /tmp/docker-anon/config.json; DOCKER_CONFIG=/tmp/docker-anon MODE=build PROJECT_NAME=rinha-rust-local ./scripts/k6-local.sh; cat test/results.json'
+wsl bash -lc 'cd /root/rinha-2026-rust-wsl-bench; mkdir -p /tmp/docker-anon; printf "{}\n" > /tmp/docker-anon/config.json; DOCKER_CONFIG=/tmp/docker-anon MODE=build PROJECT_NAME=rinha-rust-local API_CPU=0.40 API_MEMORY=162MB LB_CPU=0.20 LB_MEMORY=20MB API1_CPUSET=0 API2_CPUSET=1 LB_CPUSET=2,3 ./scripts/k6-local.sh; cat test/results.json'
 ```
 
 Registre o JSON gerado junto com commit, preset, CPU/memoria e se o teste foi
