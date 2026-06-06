@@ -9,18 +9,20 @@ use crate::index::{Index, SearchParams};
 use std::env;
 use std::fs;
 use std::io;
-use std::net::TcpListener as StdTcpListener;
+use std::net::{SocketAddr, SocketAddrV4, TcpListener as StdTcpListener};
 use std::os::fd::{IntoRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::atomic::AtomicUsize;
+use std::sync::mpsc;
 use std::sync::Arc;
+use std::thread;
 use std::time::Instant;
 
 const MAX_EVENTS: usize = 1024;
 const MAX_FD_SLOTS: usize = 65_536;
-const PENDING_CAP: usize = 8 * 1024;
+const PENDING_CAP: usize = 512;
 
 #[derive(Clone, Copy)]
 struct WaitTuning {
@@ -275,14 +277,51 @@ pub fn serve_tcp_epoll(
     load: Arc<AtomicUsize>,
     keep_alive_requests: usize,
 ) -> Result<(), String> {
-    let listener = StdTcpListener::bind(bind_addr)
-        .map_err(|e| format!("failed to bind raw tcp listener {bind_addr}: {e}"))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|e| format!("failed to set raw tcp listener nonblocking: {e}"))?;
-    let listener_fd = listener.into_raw_fd();
-    configure_tcp_listener(listener_fd);
+    let worker_count = env_usize("TCP_RAW_WORKERS", 1).max(1);
+    if worker_count == 1 {
+        return serve_tcp_epoll_worker(0, bind_addr, index, params, load, keep_alive_requests);
+    }
 
+    let (tx, rx) = mpsc::channel::<String>();
+    for worker_id in 0..worker_count {
+        let bind_addr = bind_addr.to_string();
+        let index = Arc::clone(&index);
+        let params = Arc::clone(&params);
+        let load = Arc::clone(&load);
+        let tx = tx.clone();
+        thread::Builder::new()
+            .name(format!("tcp-raw-{worker_id}"))
+            .spawn(move || {
+                if let Err(err) = serve_tcp_epoll_worker(
+                    worker_id,
+                    &bind_addr,
+                    index,
+                    params,
+                    load,
+                    keep_alive_requests,
+                ) {
+                    let _ = tx.send(err);
+                }
+            })
+            .map_err(|e| format!("failed to spawn tcp raw worker {worker_id}: {e}"))?;
+    }
+    drop(tx);
+
+    match rx.recv() {
+        Ok(err) => Err(err),
+        Err(_) => Err("all tcp raw workers exited".to_string()),
+    }
+}
+
+fn serve_tcp_epoll_worker(
+    worker_id: usize,
+    bind_addr: &str,
+    index: Arc<Index>,
+    params: Arc<SearchParams>,
+    load: Arc<AtomicUsize>,
+    keep_alive_requests: usize,
+) -> Result<(), String> {
+    let listener_fd = create_tcp_listener(bind_addr)?;
     let epfd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
     if epfd < 0 {
         close_fd(listener_fd);
@@ -311,7 +350,7 @@ pub fn serve_tcp_epoll(
     let mut clients = ConnTable::new(conn_pool_cap);
 
     eprintln!(
-        "tcp epoll raw enabled, bind={bind_addr}, timeout_ms={}, spin_us={}, idle_us={}, busy_poll_us={}, busy_poll_budget={}, prefer_busy_poll={}, accept_batch={accept_batch}, tcp_client_setup={tcp_client_setup}, conn_pool_cap={conn_pool_cap}",
+        "tcp epoll raw enabled, worker={worker_id}, bind={bind_addr}, timeout_ms={}, spin_us={}, idle_us={}, busy_poll_us={}, busy_poll_budget={}, prefer_busy_poll={}, accept_batch={accept_batch}, tcp_client_setup={tcp_client_setup}, conn_pool_cap={conn_pool_cap}",
         wait.timeout_ms,
         wait.spin_us,
         wait.idle_us,
@@ -366,6 +405,77 @@ pub fn serve_tcp_epoll(
             }
         }
     }
+}
+
+fn create_tcp_listener(bind_addr: &str) -> Result<RawFd, String> {
+    let parsed: SocketAddr = bind_addr
+        .parse()
+        .map_err(|e| format!("failed to parse raw tcp bind address {bind_addr}: {e}"))?;
+    match parsed {
+        SocketAddr::V4(addr) => create_tcp_v4_listener(addr, bind_addr),
+        SocketAddr::V6(_) => {
+            let listener = StdTcpListener::bind(bind_addr)
+                .map_err(|e| format!("failed to bind raw tcp listener {bind_addr}: {e}"))?;
+            listener
+                .set_nonblocking(true)
+                .map_err(|e| format!("failed to set raw tcp listener nonblocking: {e}"))?;
+            let fd = listener.into_raw_fd();
+            configure_tcp_listener(fd);
+            Ok(fd)
+        }
+    }
+}
+
+fn create_tcp_v4_listener(addr: SocketAddrV4, bind_addr: &str) -> Result<RawFd, String> {
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_INET,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if fd < 0 {
+        return Err(format!(
+            "failed to create raw tcp listener socket {bind_addr}: {}",
+            io::Error::last_os_error()
+        ));
+    }
+
+    configure_tcp_listener(fd);
+
+    let sockaddr = libc::sockaddr_in {
+        sin_family: libc::AF_INET as libc::sa_family_t,
+        sin_port: addr.port().to_be(),
+        sin_addr: libc::in_addr {
+            s_addr: u32::from_ne_bytes(addr.ip().octets()),
+        },
+        sin_zero: [0; 8],
+    };
+
+    if unsafe {
+        libc::bind(
+            fd,
+            (&sockaddr as *const libc::sockaddr_in).cast(),
+            std::mem::size_of_val(&sockaddr) as libc::socklen_t,
+        )
+    } < 0
+    {
+        let err = io::Error::last_os_error();
+        close_fd(fd);
+        return Err(format!(
+            "failed to bind raw tcp listener {bind_addr}: {err}"
+        ));
+    }
+
+    if unsafe { libc::listen(fd, env_i32("TCP_BACKLOG", 65535)) } < 0 {
+        let err = io::Error::last_os_error();
+        close_fd(fd);
+        return Err(format!(
+            "failed to listen on raw tcp listener {bind_addr}: {err}"
+        ));
+    }
+
+    Ok(fd)
 }
 
 fn accept_controls(
@@ -759,10 +869,6 @@ fn client_interest(has_pending: bool) -> u32 {
     if has_pending {
         events |= libc::EPOLLOUT as u32;
     }
-    #[cfg(target_os = "linux")]
-    {
-        events |= libc::EPOLLRDHUP as u32;
-    }
     events
 }
 
@@ -792,6 +898,15 @@ fn configure_tcp_listener(fd: RawFd) {
             std::mem::size_of_val(&one) as libc::socklen_t,
         );
         #[cfg(target_os = "linux")]
+        if env_bool("TCP_REUSEPORT", true) {
+            let _ = libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_REUSEPORT,
+                (&one as *const libc::c_int).cast(),
+                std::mem::size_of_val(&one) as libc::socklen_t,
+            );
+        }
         if env_bool("TCP_DEFER_ACCEPT", true) {
             let _ = libc::setsockopt(
                 fd,
@@ -800,6 +915,19 @@ fn configure_tcp_listener(fd: RawFd) {
                 (&one as *const libc::c_int).cast(),
                 std::mem::size_of_val(&one) as libc::socklen_t,
             );
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let busy_poll_us = env_i32("TCP_SOCKET_BUSY_POLL_US", 0);
+            if busy_poll_us > 0 {
+                let _ = libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_BUSY_POLL,
+                    (&busy_poll_us as *const libc::c_int).cast(),
+                    std::mem::size_of_val(&busy_poll_us) as libc::socklen_t,
+                );
+            }
         }
     }
 }

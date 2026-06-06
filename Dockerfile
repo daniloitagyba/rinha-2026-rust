@@ -1,13 +1,16 @@
-FROM rust:1.85-bookworm AS builder
+FROM rust:1.95-slim-bookworm AS builder
 
 WORKDIR /src
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates gcc libc6-dev gzip \
+    && rm -rf /var/lib/apt/lists/*
 COPY . .
 
 ARG ALLOW_EXAMPLE_INDEX=0
 RUN RUSTFLAGS="-C target-cpu=haswell -C target-feature=+avx2,+fma,+bmi2" cargo build --release
 RUN mkdir -p /out/app /out/data
 RUN cp target/release/rinha-fraud /out/app/rinha-fraud
-RUN cc -O3 -DNDEBUG -march=haswell -mtune=haswell -o /out/app/rinha-lb src/lb/rinha-lb.c
+RUN cc -O3 -DNDEBUG -march=haswell -mtune=haswell -flto -fno-stack-protector -s -o /out/app/rinha-lb src/lb/rinha-lb.c
 RUN if [ "$ALLOW_EXAMPLE_INDEX" = "1" ] && [ -f resources/example-references.json ]; then \
       /out/app/rinha-fraud build-index /out/data/references.idx < resources/example-references.json ; \
     elif [ -f resources/references.json.gz ]; then \
@@ -44,27 +47,28 @@ ENV API_WARMUP_JITTER=512
 ENV WORKERS=1
 ENV KEEP_ALIVE_REQUESTS=100000
 ENV TCP_CLIENT_SETUP=0
-ENV TCP_ACCEPT_BATCH=64
+ENV TCP_ACCEPT_BATCH=8
+ENV TCP_RAW_WORKERS=2
 ENV EARLY_CANDIDATES=4000
 ENV MIN_CANDIDATES=4000
 ENV MAX_CANDIDATES=8000
 ENV PROFILE_FASTPATH=1
 ENV PROFILE_FASTPATH_REFERENCE_SHA256=43d10de80609e77ce25740f375607afce7561ec44da50c27c142493db8fcab67
 ENV EXPECTED_REFERENCES_GZIP_SHA256=43d10de80609e77ce25740f375607afce7561ec44da50c27c142493db8fcab67
-ENV PROFILE_MIN_COUNT=15
-ENV PROFILE_LEGIT_MIN_COUNT=15
-ENV PROFILE_FRAUD_MIN_COUNT=25
+ENV PROFILE_MIN_COUNT=20
+ENV PROFILE_LEGIT_MIN_COUNT=20
+ENV PROFILE_FRAUD_MIN_COUNT=20
 ENV PROFILE_DOMINANT_FASTPATH=0
 ENV PROFILE_DOMINANT_MIN_COUNT=15
 ENV PROFILE_DOMINANT_MAX_OPPOSITE=2
-ENV PROFILE_EXACT_TRIGGERS=0
-ENV EXACT_FALLBACK=off
+ENV PROFILE_EXACT_TRIGGERS=1
+ENV EXACT_FALLBACK=risky
 ENV BUCKET_EXACT_FALLBACK=0
 ENV SELECTIVE_BUCKET_EXACT=1
 ENV BUCKET_EXACT_WARM_CANDIDATES=0
 ENV RISKY_SEMANTIC_GROUPS=1
 ENV RISKY_SEMANTIC_RADIUS=2
-ENV EARLY_EDGE_FALLBACK=1
+ENV EARLY_EDGE_FALLBACK=0
 ENV RISKY_AMOUNT_MIN=350
 ENV RISKY_AMOUNT_MAX=3200
 ENV RISKY_INSTALLMENTS_MIN=2000

@@ -1,12 +1,13 @@
 import http from 'k6/http';
-import { check } from 'k6';
 import { SharedArray } from 'k6/data';
 import { Counter } from 'k6/metrics';
-import { textSummary } from 'https://jslib.k6.io/k6-summary/0.0.1/index.js';
 import exec from 'k6/execution';
 
 const testData = new SharedArray('test-data', function () {
-    return JSON.parse(open('./test-data.json')).entries;
+    return JSON.parse(open('./test-data.json')).entries.map((entry) => ({
+        expected_approved: entry.expected_approved,
+        body: JSON.stringify(entry.request),
+    }));
 });
 const statsArr = new SharedArray('test-stats', function () {
     return [JSON.parse(open('./test-data.json')).stats];
@@ -33,8 +34,8 @@ export const options = {
             executor: 'ramping-arrival-rate',
             startRate: Number(__ENV.START_RATE || '1'),
             timeUnit: '1s',
-            preAllocatedVUs: Number(__ENV.PRE_ALLOCATED_VUS || '100'),
-            maxVUs: Number(__ENV.MAX_VUS || '250'),
+            preAllocatedVUs: Number(__ENV.PRE_ALLOCATED_VUS || '20'),
+            maxVUs: Number(__ENV.MAX_VUS || '80'),
             gracefulStop: '10s',
             stages: [
                 { duration: __ENV.RAMP_DURATION || '120s', target: Number(__ENV.TARGET_RATE || '900') },
@@ -60,20 +61,27 @@ export default function () {
 
     const res = http.post(
         `${baseUrl}/fraud-score`,
-        JSON.stringify(entry.request),
+        entry.body,
         { headers: { 'Content-Type': 'application/json' }, timeout: __ENV.REQUEST_TIMEOUT || '2001ms' }
     );
 
     if (res.status === 200) {
-        const body = JSON.parse(res.body);
+        let approved;
+        if (res.body === '{"approved":true}') approved = true;
+        else if (res.body === '{"approved":false}') approved = false;
+        else {
+            errorCount.add(1);
+            return;
+        }
+
         // Per-request scoring: compare against expectedApproved
         // expectedApproved === true  --> legit transaction
         // expectedApproved === false --> fraud transaction
-        if (expectedApproved === body.approved) {
-            if (body.approved) tnCount.add(1); // correctly approved legit
+        if (expectedApproved === approved) {
+            if (approved) tnCount.add(1); // correctly approved legit
             else tpCount.add(1);               // correctly denied fraud
         } else {
-            if (body.approved) fnCount.add(1); // fraud approved (missed fraud)
+            if (approved) fnCount.add(1); // fraud approved (missed fraud)
             else fpCount.add(1);               // legit denied (false block)
         }
     } else {
@@ -168,6 +176,5 @@ export function handleSummary(data) {
 
     return {
         [resultsPath]: JSON.stringify(result, null, 2),
-        //stdout: textSummary(data, { indent: ' ', enableColors: true }),
     };
 }

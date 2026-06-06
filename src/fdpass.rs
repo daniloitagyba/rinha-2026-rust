@@ -45,7 +45,7 @@ pub fn receive_client_fd_raw_into(
     flags: libc::c_int,
     initial_out: &mut [u8],
 ) -> io::Result<Option<ReceivedFdInto>> {
-    let mut data = [0u8; 8192];
+    let mut data = [0u8; 1];
     let mut control_buf = [0u8; 64];
 
     loop {

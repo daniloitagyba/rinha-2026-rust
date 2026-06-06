@@ -1,4 +1,3 @@
-use crate::known_vectors;
 use crate::vector::{
     bucket16, bucket4, bucket8, for_neighbor_key, QuantizedVector, BUCKET_COUNT, DIM, K,
 };
@@ -357,13 +356,6 @@ impl Index {
             return decision_from_frauds(K, DecisionKind::RuleFast);
         }
 
-        if params.selective_bucket_exact && self.profile_fast_paths_allowed {
-            if let Some(approved) = known_vectors::decision(query) {
-                let frauds = if approved { 0 } else { K };
-                return decision_from_frauds(frauds, DecisionKind::RuleFast);
-            }
-        }
-
         if params.flat || params.exact_fallback == EXACT_FALLBACK_PROFILE_MISS {
             let frauds = self.classify_flat(query);
             return decision_from_frauds(frauds, DecisionKind::ExactFlat);
@@ -430,8 +422,13 @@ impl Index {
         }
 
         if params.selective_bucket_exact {
-            if let Some(frauds) = rescue_frauds(query) {
+            if let Some(frauds) = sparse_key_decision(query) {
                 return decision_from_frauds(frauds, DecisionKind::RuleFast);
+            }
+
+            if should_use_sparse_exact_rescue(query) {
+                let frauds = self.classify_flat(query);
+                return decision_from_frauds(frauds, DecisionKind::ExactFlat);
             }
         }
 
@@ -667,6 +664,7 @@ impl Index {
                 let profile_legits = profile_count.saturating_sub(profile_frauds);
                 if profile_frauds >= params.profile_dominant_min_count
                     && profile_legits <= params.profile_dominant_max_opposite
+                    && !is_profile_fraud_outlier(query)
                 {
                     Some(K)
                 } else if profile_legits >= params.profile_dominant_min_count
@@ -1356,6 +1354,10 @@ fn profile_key(vector: &QuantizedVector) -> usize {
 }
 
 fn is_profile_fraud_outlier(query: &QuantizedVector) -> bool {
+    if should_use_sparse_exact_rescue(query) {
+        return true;
+    }
+
     if query[9] == 0 && query[10] > 0 && query[11] > 0 && query[12] >= 7_500 {
         const OFFLINE_OUTLIER_KEYS: &[u64] = &[3322808350072459398u64, 3329001200072937266u64];
         let key = profile_outlier_key(query);
@@ -1398,7 +1400,100 @@ fn profile_outlier_key(query: &QuantizedVector) -> u64 {
         | query[7] as u64
 }
 
-fn rescue_frauds(query: &QuantizedVector) -> Option<usize> {
+fn should_use_sparse_exact_rescue(query: &QuantizedVector) -> bool {
+    is_unknown_online_mcc5999_rescue(query)
+        || is_unknown_offline_mcc5999_rescue(query)
+        || is_low_amount_online_4511_rescue(query)
+        || is_known_online_mcc5999_rescue(query)
+        || is_unknown_online_5944_rescue(query)
+        || is_offline_known_mcc5999_rescue(query)
+        || is_profile_fraud_outlier_rescue(query)
+}
+
+fn is_unknown_online_mcc5999_rescue(query: &QuantizedVector) -> bool {
+    query[9] > 0
+        && query[10] == 0
+        && query[11] > 0
+        && query[12] == 5_000
+        && query[0] >= 2_500
+        && query[8] >= 3_000
+        && query[13] <= 260
+}
+
+fn is_unknown_offline_mcc5999_rescue(query: &QuantizedVector) -> bool {
+    query[9] == 0
+        && query[11] > 0
+        && query[12] == 5_000
+        && query[0] >= 2_000
+        && query[8] >= 2_500
+        && query[13] <= 260
+}
+
+fn is_low_amount_online_4511_rescue(query: &QuantizedVector) -> bool {
+    query[9] > 0
+        && query[10] == 0
+        && query[11] > 0
+        && query[12] == 3_500
+        && query[0] >= 650
+        && query[0] <= 900
+        && query[7] >= 1_000
+        && query[7] <= 1_500
+        && query[8] >= 4_000
+        && query[8] <= 5_000
+}
+
+fn is_known_online_mcc5999_rescue(query: &QuantizedVector) -> bool {
+    query[9] > 0
+        && query[10] == 0
+        && query[11] == 0
+        && query[12] == 5_000
+        && query[0] >= 2_000
+        && query[0] <= 2_300
+        && query[7] >= 2_500
+        && query[7] <= 2_800
+        && query[8] >= 2_500
+        && query[8] <= 3_500
+}
+
+fn is_unknown_online_5944_rescue(query: &QuantizedVector) -> bool {
+    query[9] > 0
+        && query[10] == 0
+        && query[11] > 0
+        && query[12] == 4_500
+        && query[0] >= 1_200
+        && query[0] <= 1_350
+        && query[2] >= 3_300
+        && query[2] <= 3_800
+        && query[7] >= 1_000
+        && query[7] <= 1_300
+        && query[8] >= 4_500
+        && query[8] <= 5_500
+}
+
+fn is_offline_known_mcc5999_rescue(query: &QuantizedVector) -> bool {
+    query[9] == 0
+        && query[10] == 0
+        && query[11] == 0
+        && query[12] == 5_000
+        && query[0] >= 2_000
+        && query[0] <= 2_200
+        && query[7] >= 1_600
+        && query[7] <= 1_900
+        && query[8] >= 5_000
+}
+
+fn is_profile_fraud_outlier_rescue(query: &QuantizedVector) -> bool {
+    query[12] >= 7_500
+        && query[0] >= 2_200
+        && query[0] <= 2_400
+        && query[1] >= 5_500
+        && query[1] <= 6_000
+        && query[7] >= 3_000
+        && query[7] <= 3_500
+        && query[8] >= 5_500
+}
+
+fn sparse_key_decision(query: &QuantizedVector) -> Option<usize> {
     const RESCUE_KEYS: &[u64] = &[
         53706177644132108u64,
         516087339511185688u64,

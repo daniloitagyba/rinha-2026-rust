@@ -35,6 +35,17 @@ static int lb_sendmsg_dontwait = 0;
 static int lb_prebuffer_initial = 0;
 static int socket_buffer_size = 16384;
 
+struct fd_backend {
+    int fd;
+    char dummy;
+    struct iovec iov;
+    char control[CMSG_SPACE(sizeof(int))];
+    struct msghdr msg;
+    struct cmsghdr *cmsg;
+};
+
+static struct fd_backend fd_backends[MAX_BACKENDS];
+
 struct proxy_conn {
     int client_fd;
     int backend_fd;
@@ -124,7 +135,25 @@ static void configure_client(int fd) {
 static void init_control_fds(void) {
     for (int i = 0; i < MAX_BACKENDS; i++) {
         control_fds[i] = -1;
+        fd_backends[i].fd = -1;
     }
+}
+
+static void init_fd_backend(unsigned int index, int fd) {
+    struct fd_backend *backend = &fd_backends[index];
+    memset(backend, 0, sizeof(*backend));
+    backend->fd = fd;
+    backend->dummy = 1;
+    backend->iov.iov_base = &backend->dummy;
+    backend->iov.iov_len = 1;
+    backend->msg.msg_iov = &backend->iov;
+    backend->msg.msg_iovlen = 1;
+    backend->msg.msg_control = backend->control;
+    backend->msg.msg_controllen = sizeof(backend->control);
+    backend->cmsg = CMSG_FIRSTHDR(&backend->msg);
+    backend->cmsg->cmsg_level = SOL_SOCKET;
+    backend->cmsg->cmsg_type = SCM_RIGHTS;
+    backend->cmsg->cmsg_len = CMSG_LEN(sizeof(int));
 }
 
 static void init_backends(void) {
@@ -167,6 +196,9 @@ static int connect_control(unsigned int index) {
     if (fd < 0) {
         return -1;
     }
+
+    int sndbuf = 256 * 1024;
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
 
     struct sockaddr_un addr;
     memset(&addr, 0, sizeof(addr));
@@ -213,6 +245,9 @@ static int ensure_control(unsigned int index) {
 
     int fd = connect_control(index);
     control_fds[index] = fd;
+    if (fd >= 0) {
+        init_fd_backend(index, fd);
+    }
     return fd;
 }
 
@@ -233,18 +268,23 @@ static unsigned int choose_backend(void) {
 }
 
 static int send_fd_with_flags(int control_fd, int fd_to_send, const char *initial, size_t initial_len, int flags) {
-    char data[8193];
-    data[0] = 0;
-    if (initial_len > sizeof(data) - 1) {
-        initial_len = sizeof(data) - 1;
-    }
+    char small_data = 0;
+    char prebuffered_data[8193];
+    void *iov_base = &small_data;
+    size_t iov_len = 1;
     if (initial_len > 0) {
-        memcpy(data + 1, initial, initial_len);
+        prebuffered_data[0] = 0;
+        if (initial_len > sizeof(prebuffered_data) - 1) {
+            initial_len = sizeof(prebuffered_data) - 1;
+        }
+        memcpy(prebuffered_data + 1, initial, initial_len);
+        iov_base = prebuffered_data;
+        iov_len = initial_len + 1;
     }
 
     struct iovec io;
-    io.iov_base = data;
-    io.iov_len = initial_len + 1;
+    io.iov_base = iov_base;
+    io.iov_len = iov_len;
 
     char cmsgbuf[CMSG_SPACE(sizeof(int))];
     memset(cmsgbuf, 0, sizeof(cmsgbuf));
@@ -278,6 +318,25 @@ static int send_fd_with_flags(int control_fd, int fd_to_send, const char *initia
     }
 }
 
+static int send_fd_prebuilt_with_flags(struct fd_backend *backend, int fd_to_send, int flags) {
+    backend->msg.msg_controllen = sizeof(backend->control);
+    memcpy(CMSG_DATA(backend->cmsg), &fd_to_send, sizeof(int));
+
+    for (;;) {
+        ssize_t sent = sendmsg(backend->fd, &backend->msg, flags);
+        if (sent == (ssize_t)backend->iov.iov_len) {
+            return 0;
+        }
+        if (sent < 0 && errno == EINTR) {
+            continue;
+        }
+        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            return 1;
+        }
+        return -1;
+    }
+}
+
 static int send_fd(int control_fd, int fd_to_send, const char *initial, size_t initial_len) {
     int flags = MSG_NOSIGNAL;
     if (lb_sendmsg_dontwait) {
@@ -292,7 +351,9 @@ static int deliver_fd(int client_fd, const char *initial, size_t initial_len) {
         unsigned int index = (start + attempt) % backend_count;
         int control_fd = ensure_control(index);
         if (control_fd >= 0) {
-            int result = send_fd(control_fd, client_fd, initial, initial_len);
+            int result = (initial_len == 0 && fd_backends[index].fd >= 0)
+                ? send_fd_prebuilt_with_flags(&fd_backends[index], client_fd, MSG_NOSIGNAL | (lb_sendmsg_dontwait ? MSG_DONTWAIT : 0))
+                : send_fd(control_fd, client_fd, initial, initial_len);
             if (result == 0) {
                 return 0;
             }
@@ -304,12 +365,16 @@ static int deliver_fd(int client_fd, const char *initial, size_t initial_len) {
         if (control_fds[index] >= 0) {
             close(control_fds[index]);
             control_fds[index] = -1;
+            fd_backends[index].fd = -1;
         }
     }
 
     if (lb_sendmsg_dontwait) {
         int control_fd = ensure_control(start);
-        if (control_fd >= 0 && send_fd_with_flags(control_fd, client_fd, initial, initial_len, MSG_NOSIGNAL) == 0) {
+        if (control_fd >= 0 && (
+            (initial_len == 0 && fd_backends[start].fd >= 0
+                && send_fd_prebuilt_with_flags(&fd_backends[start], client_fd, MSG_NOSIGNAL) == 0)
+            || send_fd_with_flags(control_fd, client_fd, initial, initial_len, MSG_NOSIGNAL) == 0)) {
             return 0;
         }
     }
@@ -1093,11 +1158,11 @@ int main(void) {
     init_control_fds();
     init_backends();
 
-    fd_control_seqpacket = env_enabled("FD_CONTROL_SEQPACKET", 0);
+    fd_control_seqpacket = env_enabled("FD_CONTROL_SEQPACKET", 1);
     lb_preconnect_control = env_enabled("LB_PRECONNECT_CONTROL", 1);
     lb_tcp_nodelay = env_enabled("LB_TCP_NODELAY", 1);
     lb_socket_buffers = env_enabled("LB_SOCKET_BUFFERS", 1);
-    lb_sendmsg_dontwait = env_enabled("LB_SENDMSG_DONTWAIT", 0);
+    lb_sendmsg_dontwait = env_enabled("LB_SENDMSG_DONTWAIT", 1);
     lb_prebuffer_initial = env_enabled("LB_PREBUFFER_INITIAL", 0);
     socket_buffer_size = env_int("SOCKET_BUFFER_SIZE", 16384);
 

@@ -7,6 +7,8 @@ MODE="${MODE:-submission}"
 RUNNER_PRESET="${RUNNER_PRESET:-default}"
 PROJECT_NAME="${PROJECT_NAME:-rinha-rust-local}"
 K6_IMAGE="${K6_IMAGE:-grafana/k6:latest}"
+BASE_URL="${BASE_URL:-http://lb:9999}"
+K6_NETWORK_MODE="${K6_NETWORK_MODE:-compose}"
 HOST_PORT="${HOST_PORT:-9999}"
 SUBMISSION_COMPOSE_FILE="${SUBMISSION_COMPOSE_FILE:-}"
 KEEP_SERVICES="${KEEP_SERVICES:-0}"
@@ -316,11 +318,21 @@ K6_CPUSET_ARGS=""
 if [ -n "${K6_CPUSET:-}" ]; then
   K6_CPUSET_ARGS="--cpuset-cpus=$K6_CPUSET"
 fi
+K6_NETWORK_ARGS="--network ${PROJECT_NAME}_default"
+if [ "$K6_NETWORK_MODE" = "host" ]; then
+  K6_NETWORK_ARGS="--network host"
+  if [ "${BASE_URL:-http://lb:9999}" = "http://lb:9999" ]; then
+    BASE_URL="http://127.0.0.1:$HOST_PORT"
+  fi
+elif [ "$K6_NETWORK_MODE" != "compose" ]; then
+  echo "K6_NETWORK_MODE must be compose or host" >&2
+  exit 2
+fi
 
 docker run --rm \
   $K6_CPUSET_ARGS \
-  --network "${PROJECT_NAME}_default" \
-  -e BASE_URL="http://lb:9999" \
+  $K6_NETWORK_ARGS \
+  -e BASE_URL="$BASE_URL" \
   -e RESULTS_PATH="/scripts/results.json" \
   -e TARGET_RATE \
   -e RAMP_DURATION \
